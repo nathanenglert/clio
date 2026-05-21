@@ -39,6 +39,8 @@ export type ActivityEvent = {
   detail: string;
   status: "ok" | "error";
   duration_ms: number;
+  /** Full-fidelity payload for tools whose `detail` is truncated. Currently the un-truncated SQL on `run_query`. */
+  payload?: string;
 };
 
 export type McpTarget = {

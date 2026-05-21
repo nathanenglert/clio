@@ -3,7 +3,7 @@ import { api, onActivity, type ActivityEvent, type Connection } from "./lib/api"
 import { ConnectionRail } from "./components/ConnectionRail";
 import { SchemaTree } from "./components/SchemaTree";
 import { Workspace } from "./components/Workspace";
-import { ActivityStrip } from "./components/ActivityStrip";
+import { AgentSurface } from "./components/AgentSurface";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 
@@ -14,6 +14,7 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [sql, setSql] = useState("SELECT now() AS server_time;");
+  const [runTrigger, setRunTrigger] = useState(0);
 
   const refresh = async () => {
     try {
@@ -28,7 +29,7 @@ export function App() {
   useEffect(() => {
     refresh();
     const unlisten = onActivity((e) => {
-      setEvents((prev) => [...prev.slice(-49), e]);
+      setEvents((prev) => [...prev.slice(-199), e]);
       // Connection-state-changing tools should refresh the rail
       if (e.tool === "connect" || e.tool === "disconnect" || e.tool === "add_connection" || e.tool === "delete_connection") {
         refresh();
@@ -67,9 +68,17 @@ export function App() {
           sql={sql}
           setSql={setSql}
           onOpenMcpModal={() => setShowMcp(true)}
+          runTrigger={runTrigger}
         />
       </div>
-      <ActivityStrip events={events} />
+      <AgentSurface
+        events={events}
+        onOpenSql={setSql}
+        onRerunSql={(s) => {
+          setSql(s);
+          setRunTrigger((n) => n + 1);
+        }}
+      />
       <div className="status">
         <span>{connections.length} connection{connections.length === 1 ? "" : "s"}</span>
         <span>·</span>

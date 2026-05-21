@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Connection, type QueryResult } from "../lib/api";
 
 type Props = {
@@ -6,9 +6,11 @@ type Props = {
   sql: string;
   setSql: (s: string) => void;
   onOpenMcpModal: () => void;
+  /** Bumped by App when an external surface (e.g. AgentSurface) wants a re-run. */
+  runTrigger?: number;
 };
 
-export function Workspace({ active, sql, setSql, onOpenMcpModal }: Props) {
+export function Workspace({ active, sql, setSql, onOpenMcpModal, runTrigger }: Props) {
   const [result, setResult] = useState<QueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -30,6 +32,15 @@ export function Workspace({ active, sql, setSql, onOpenMcpModal }: Props) {
       setRunning(false);
     }
   };
+
+  // Always-fresh reference to `run` so the trigger effect fires the latest closure.
+  const runRef = useRef(run);
+  runRef.current = run;
+
+  useEffect(() => {
+    if (!runTrigger) return;
+    runRef.current();
+  }, [runTrigger]);
 
   const onEditorKey = (e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {

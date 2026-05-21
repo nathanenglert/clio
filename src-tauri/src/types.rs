@@ -56,6 +56,10 @@ pub struct ActivityEvent {
     pub detail: String,
     pub status: String, // "ok" | "error"
     pub duration_ms: u64,
+    /// Full-fidelity payload for tools whose `detail` is necessarily truncated
+    /// (e.g. SQL on `run_query`). Capped by the caller; absent for most events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
 }
 
 impl ActivityEvent {
@@ -71,12 +75,27 @@ impl ActivityEvent {
             detail: detail.into(),
             status: status.into(),
             duration_ms,
+            payload: None,
         }
     }
+
+    pub fn with_payload(mut self, payload: Option<String>) -> Self {
+        self.payload = payload;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpTarget {
+    pub key: String,
+    pub label: String,
+    pub language: String,
+    pub instructions: String,
+    pub snippet: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct McpSnippet {
     pub binary_path: String,
-    pub snippet: String,
+    pub targets: Vec<McpTarget>,
 }

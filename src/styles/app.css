@@ -26,14 +26,20 @@ button, input, textarea, select {
 .shell {
   display: grid;
   grid-template-columns: 260px 1fr;
-  grid-template-rows: 1fr 28px 22px;
+  grid-template-rows: 1fr auto 22px;
   grid-template-areas:
     "rail   work"
-    "strip  strip"
+    "agent  agent"
     "status status";
   height: 100vh;
   width: 100vw;
   background: var(--bg-app);
+  overflow: hidden;
+}
+
+.agent-surface {
+  grid-area: agent;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -55,51 +61,6 @@ button, input, textarea, select {
   min-width: 0;
   overflow: hidden;
 }
-
-.strip {
-  grid-area: strip;
-  background: var(--bg-panel);
-  border-top: 1px solid var(--line-default);
-  padding: 0 12px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  overflow: hidden;
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  color: var(--text-secondary);
-}
-
-.strip .strip-label {
-  color: var(--agent);
-  font-weight: 500;
-  letter-spacing: 0.02em;
-}
-
-.strip .strip-feed {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  overflow-x: auto;
-  white-space: nowrap;
-}
-
-.strip-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.strip-item .source-mcp {
-  color: var(--agent);
-}
-.strip-item .source-ui {
-  color: var(--user);
-}
-.strip-item .op-read   { color: var(--op-read); }
-.strip-item .op-write  { color: var(--op-write); }
-.strip-item .op-destruct { color: var(--op-destruct); }
 
 .status {
   grid-area: status;
@@ -405,6 +366,29 @@ button, input, textarea, select {
 }
 
 /* ── MCP snippet ──────────────────────────────────────────────── */
+
+.mcp-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--line-default);
+  margin-bottom: 4px;
+}
+.mcp-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  padding: 6px 12px;
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+.mcp-tab:hover { color: var(--text-secondary); }
+.mcp-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--line-strong);
+}
 
 .snippet {
   background: var(--bg-input);

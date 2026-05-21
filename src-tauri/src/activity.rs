@@ -100,6 +100,21 @@ pub fn record<T>(
     started: std::time::Instant,
     result: &Result<T>,
 ) {
+    record_with_payload(emit, source, tool, detail, None, started, result);
+}
+
+/// Like [`record`], but also attaches a full-fidelity `payload`. Used for
+/// tools whose `detail` is necessarily a one-line summary (e.g. `run_query`
+/// truncates SQL to 80 chars for the activity strip).
+pub fn record_with_payload<T>(
+    emit: &EmitFn,
+    source: &str,
+    tool: &str,
+    detail: impl Into<String>,
+    payload: Option<String>,
+    started: std::time::Instant,
+    result: &Result<T>,
+) {
     let elapsed = started.elapsed().as_millis() as u64;
     let mut detail: String = detail.into();
     let status = match result {
@@ -115,5 +130,5 @@ pub fn record<T>(
             "error"
         }
     };
-    emit(ActivityEvent::new(source, tool, detail, status, elapsed));
+    emit(ActivityEvent::new(source, tool, detail, status, elapsed).with_payload(payload));
 }

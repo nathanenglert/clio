@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use sqlx::{Column, Row, SqlitePool, TypeInfo, ValueRef};
 use std::time::Instant;
 
-use crate::activity::{record, EmitFn};
+use crate::activity::{record, record_with_payload, EmitFn};
 use crate::connections;
 use crate::pool::PoolRegistry;
 use crate::types::{
@@ -25,6 +25,36 @@ impl Core {
     fn record_ok<T>(&self, tool: &str, detail: impl Into<String>, started: Instant, result: &Result<T>) {
         record(&self.emit, &self.source, tool, detail, started, result);
     }
+
+    /// Same as [`Self::record_ok`] but attaches a full-fidelity payload
+    /// (e.g. the un-truncated SQL for `run_query`).
+    fn record_ok_with_payload<T>(
+        &self,
+        tool: &str,
+        detail: impl Into<String>,
+        payload: Option<String>,
+        started: Instant,
+        result: &Result<T>,
+    ) {
+        record_with_payload(&self.emit, &self.source, tool, detail, payload, started, result);
+    }
+}
+
+/// Cap full-text payloads (e.g. SQL) emitted on activity events.
+const PAYLOAD_MAX_BYTES: usize = 4096;
+
+fn cap_payload(s: &str) -> String {
+    if s.len() <= PAYLOAD_MAX_BYTES {
+        return s.to_string();
+    }
+    let mut end = PAYLOAD_MAX_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + 4);
+    out.push_str(&s[..end]);
+    out.push_str(" …");
+    out
 }
 
 // ── Connection metadata ───────────────────────────────────────────
@@ -286,13 +316,14 @@ pub async fn run_query(core: &Core, conn: &str, sql: &str) -> Result<QueryResult
     }
     .await;
 
-    // Trim long SQL for the activity log
+    // One-line summary for the activity strip; full SQL goes on `payload`.
     let mut detail = sql.replace('\n', " ");
     if detail.len() > 80 {
         detail.truncate(77);
         detail.push_str("...");
     }
-    core.record_ok("run_query", detail, started, &r);
+    let payload = Some(cap_payload(sql));
+    core.record_ok_with_payload("run_query", detail, payload, started, &r);
     r
 }
 
