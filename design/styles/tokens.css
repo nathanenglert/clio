@@ -1,0 +1,123 @@
+/* Database App — design tokens
+   Warm dark paper canvas. Single copper accent for agent identity.
+*/
+
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500&display=swap');
+
+:root {
+  /* ── Surfaces (warm dark) ─────────────────────────────────────── */
+  --bg-canvas:      #151310;   /* deepest — behind everything */
+  --bg-app:         #1a1714;   /* app body */
+  --bg-panel:       #1f1c18;   /* sidebars, dock */
+  --bg-elevated:    #25211c;   /* cards, popovers, hover */
+  --bg-elevated-2:  #2b2721;   /* nested cards, active states */
+  --bg-input:       #1a1714;   /* code editor, inputs */
+  --bg-overlay:     rgba(10, 8, 6, 0.72); /* modal scrim */
+
+  /* ── Lines ────────────────────────────────────────────────────── */
+  --line-faint:     rgba(255, 240, 220, 0.05);
+  --line-soft:      rgba(255, 240, 220, 0.08);
+  --line-default:   rgba(255, 240, 220, 0.12);
+  --line-strong:    rgba(255, 240, 220, 0.20);
+
+  /* ── Text ─────────────────────────────────────────────────────── */
+  --text-primary:   #ebe4d8;   /* warm off-white */
+  --text-secondary: #a89f8f;
+  --text-muted:     #6e6759;
+  --text-faint:     #4a4538;
+
+  /* ── Agent identity (copper / amber) ──────────────────────────── */
+  --agent:          #d4915a;   /* the agent's color, used everywhere they appear */
+  --agent-soft:     #8a5a36;
+  --agent-dim:      #4a3320;
+  --agent-wash:     rgba(212, 145, 90, 0.08); /* background tint for agent zones */
+  --agent-wash-hi:  rgba(212, 145, 90, 0.14);
+  --agent-line:     rgba(212, 145, 90, 0.32);
+  --agent-glow:     0 0 0 1px rgba(212, 145, 90, 0.35), 0 0 24px -6px rgba(212, 145, 90, 0.35);
+
+  /* ── User identity (cool, calm) ───────────────────────────────── */
+  --user:           #8aa6b3;   /* used sparingly — the human is the default */
+  --user-soft:      #4a6470;
+
+  /* ── Op semantics ─────────────────────────────────────────────── */
+  --op-read:        #7fa886;   /* SELECT, read-only */
+  --op-read-soft:   rgba(127, 168, 134, 0.14);
+  --op-write:       #d4a155;   /* INSERT, UPDATE — caution gold */
+  --op-write-soft:  rgba(212, 161, 85, 0.14);
+  --op-destruct:    #d96c54;   /* DELETE, DROP, TRUNCATE — red */
+  --op-destruct-soft: rgba(217, 108, 84, 0.14);
+  --op-ddl:         #b591c4;   /* ALTER, CREATE schema changes */
+  --op-ddl-soft:    rgba(181, 145, 196, 0.14);
+
+  /* ── Status ──────────────────────────────────────────────────── */
+  --status-ok:      #7fa886;
+  --status-pending: #d4a155;
+  --status-blocked: #d96c54;
+  --status-idle:    #6e6759;
+
+  /* ── Type ────────────────────────────────────────────────────── */
+  --font-ui:    'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono:  'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-serif: 'Source Serif 4', Georgia, serif;
+
+  --fs-xs:   11px;
+  --fs-sm:   12px;
+  --fs-base: 13px;
+  --fs-md:   14px;
+  --fs-lg:   16px;
+  --fs-xl:   20px;
+  --fs-2xl:  28px;
+
+  /* ── Radii ───────────────────────────────────────────────────── */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+
+  /* ── Shadows ─────────────────────────────────────────────────── */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.25);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.35), 0 1px 2px rgba(0,0,0,0.25);
+  --shadow-lg: 0 24px 64px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.4);
+  --shadow-window: 0 1px 0 rgba(255,240,220,0.04) inset, 0 24px 64px rgba(0,0,0,0.5);
+}
+
+/* Reset/normalize specific to artboards */
+.app-root, .app-root * {
+  box-sizing: border-box;
+}
+.app-root {
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  color: var(--text-primary);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+  line-height: 1.45;
+  letter-spacing: -0.005em;
+}
+.app-root .mono {
+  font-family: var(--font-mono);
+  font-feature-settings: 'zero', 'ss02';
+  letter-spacing: 0;
+}
+.app-root .serif {
+  font-family: var(--font-serif);
+  font-feature-settings: 'liga';
+  letter-spacing: -0.01em;
+}
+
+/* Scrollbar suppression inside artboards (canvas already hides them) */
+.app-root ::-webkit-scrollbar { display: none; }
+.app-root { scrollbar-width: none; }
+
+/* SQL syntax — used in the Monaco-ish editor */
+.sql-kw  { color: #c98a72; font-weight: 500; }   /* SELECT, FROM, WHERE */
+.sql-fn  { color: #d4a155; }                      /* count(), now() */
+.sql-str { color: #9ab38a; }                      /* 'literals' */
+.sql-num { color: #b591c4; }                      /* 42 */
+.sql-id  { color: #c4b89c; }                      /* identifiers */
+.sql-cmt { color: #6e6759; font-style: italic; }  /* -- comments */
+.sql-op  { color: #a89f8f; }                      /* = > < */
+.sql-destruct { color: var(--op-destruct); font-weight: 600; }
+.sql-write    { color: var(--op-write);    font-weight: 500; }

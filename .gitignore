@@ -1,0 +1,30 @@
+# ── Dependencies & build output ──────────────────────────────────
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+
+# ── Editor / IDE ────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS cruft ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
+
+# ── Local-only state ────────────────────────────────────────────
+# In case anything writes to a project-local data dir (the real
+# location is ~/Library/Application Support/com.dbapp.poc/).
+.dbapp/
+*.env.local
+.env
+
+# ── Secrets ─────────────────────────────────────────────────────
+# Defensive: never commit credentials. The keychain is the source
+# of truth; nothing here should hold real passwords.
+*.pem
+*.key

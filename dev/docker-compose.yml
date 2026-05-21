@@ -1,0 +1,37 @@
+# Local development database for the Database App POC.
+#
+# Quick start:
+#   ./db.sh up        # start the container, run seed scripts on first boot
+#   ./db.sh psql      # interactive shell
+#   ./db.sh reset     # wipe data + re-seed
+#   ./db.sh down      # stop the container (keeps data)
+#
+# In the app, add a connection with:
+#   host=localhost  port=5433  database=workbench
+#   user=workbench  password=workbench  ssl_mode=disable
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: database-app-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: workbench
+      POSTGRES_PASSWORD: workbench
+      POSTGRES_DB: workbench
+      # Cap the default schema search path so the schema tree gets exercised
+      # across multiple non-`public` schemas.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "5433:5432"
+    volumes:
+      - database-app-pg-data:/var/lib/postgresql/data
+      - ./seed:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workbench -d workbench"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  database-app-pg-data:
+    name: database-app-pg-data
