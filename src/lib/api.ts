@@ -41,9 +41,17 @@ export type ActivityEvent = {
   duration_ms: number;
 };
 
+export type McpTarget = {
+  key: string;
+  label: string;
+  language: "shell" | "json";
+  instructions: string;
+  snippet: string;
+};
+
 export type McpSnippet = {
   binary_path: string;
-  snippet: string;
+  targets: McpTarget[];
 };
 
 export type NewConnectionInput = {

@@ -78,6 +78,9 @@ fn mcp_snippet() -> Result<McpSnippet, String> {
         .map_err(|e| e.to_string())?
         .display()
         .to_string();
+
+    // Same JSON shape works for both Claude Desktop's config file and
+    // Claude Code's .mcp.json / ~/.claude.json under `mcpServers`.
     let json = serde_json::json!({
         "mcpServers": {
             "database-app": {
@@ -86,8 +89,47 @@ fn mcp_snippet() -> Result<McpSnippet, String> {
             }
         }
     });
-    let snippet = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
-    Ok(McpSnippet { binary_path: path, snippet })
+    let json_snippet = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+
+    // Shell-quote the binary path in case it contains spaces (it does:
+    // "/.../Claude/Projects/Database App/...").
+    let quoted_path = shell_quote(&path);
+    let cli_snippet = format!(
+        "claude mcp add database-app -s user -- {quoted_path} --mcp"
+    );
+
+    let targets = vec![
+        McpTarget {
+            key: "claude-code".into(),
+            label: "Claude Code".into(),
+            language: "shell".into(),
+            instructions:
+                "Run this in a terminal to register the workbench at the user scope (available across all projects). Then restart any open Claude Code sessions."
+                    .into(),
+            snippet: cli_snippet,
+        },
+        McpTarget {
+            key: "claude-desktop".into(),
+            label: "Claude Desktop".into(),
+            language: "json".into(),
+            instructions:
+                "Paste into ~/Library/Application Support/Claude/claude_desktop_config.json under \"mcpServers\", then restart Claude Desktop."
+                    .into(),
+            snippet: json_snippet,
+        },
+    ];
+
+    Ok(McpSnippet { binary_path: path, targets })
+}
+
+/// Quote a path for safe use in a POSIX shell command line.
+/// Wraps in single quotes and escapes any embedded single quotes.
+fn shell_quote(s: &str) -> String {
+    if !s.contains(|c: char| c.is_whitespace() || "\"'$`\\!*?[](){}<>|&;#~".contains(c)) {
+        return s.to_string();
+    }
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 fn format_err(e: anyhow::Error) -> String {
