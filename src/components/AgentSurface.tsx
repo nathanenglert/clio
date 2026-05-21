@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActivityEvent } from "../lib/api";
+import { Splitter } from "./Splitter";
+import { useResizable } from "../lib/useResizable";
 
 type AgentTab = "Stream" | "Focus" | "Session" | "Policy";
 const TABS: AgentTab[] = ["Stream", "Focus", "Session", "Policy"];
@@ -200,6 +202,17 @@ function AgentStrip({ awaiting, lastEvent, focusedTable, now, onExpand }: StripP
   );
 }
 
+type ResizeHandle = {
+  dragging: boolean;
+  handleProps: {
+    onPointerDown: (e: React.PointerEvent) => void;
+    onPointerMove: (e: React.PointerEvent) => void;
+    onPointerUp: (e: React.PointerEvent) => void;
+    onPointerCancel: (e: React.PointerEvent) => void;
+    onDoubleClick: () => void;
+  };
+};
+
 type DrawerProps = {
   events: ActivityEvent[];
   tab: AgentTab;
@@ -209,6 +222,8 @@ type DrawerProps = {
   now: number;
   lastQuery: ActivityEvent | null;
   focusedTable: string | null;
+  height: number;
+  resize: ResizeHandle;
   onOpenSql?: (sql: string) => void;
   onRerunSql?: (sql: string) => void;
 };
@@ -222,6 +237,8 @@ function AgentDrawer({
   now,
   lastQuery,
   focusedTable,
+  height,
+  resize,
   onOpenSql,
   onRerunSql,
 }: DrawerProps) {
@@ -229,25 +246,27 @@ function AgentDrawer({
     <div
       className="agent-surface agent-drawer"
       style={{
-        height: 280,
+        height,
         display: "flex",
         flexDirection: "column",
         background: "var(--bg-panel)",
         borderTop: "1px solid var(--agent-line)",
         position: "relative",
+        overflow: "visible",
       }}
     >
-      <div
+      <Splitter
+        orientation="horizontal"
+        dragging={resize.dragging}
+        title="Drag to resize · double-click to reset"
         style={{
           position: "absolute",
           top: -3,
-          left: "50%",
-          transform: "translateX(-50%)",
-          width: 32,
-          height: 3,
-          borderRadius: 2,
-          background: "var(--line-strong)",
+          left: 0,
+          right: 0,
+          height: 6,
         }}
+        {...resize.handleProps}
       />
       <div
         style={{
@@ -902,6 +921,15 @@ export function AgentSurface({
   const sessionStartRef = useRef(Date.now());
   const [now, setNow] = useState(Date.now());
 
+  const drawer = useResizable({
+    storageKey: "db.layout.agent.height",
+    defaultSize: 280,
+    min: 160,
+    max: 600,
+    axis: "y",
+    direction: -1,
+  });
+
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
@@ -943,6 +971,8 @@ export function AgentSurface({
       now={now}
       lastQuery={lastQuery}
       focusedTable={focusedTable}
+      height={drawer.size}
+      resize={{ dragging: drawer.dragging, handleProps: drawer.handleProps }}
       onOpenSql={onOpenSql}
       onRerunSql={onRerunSql}
     />

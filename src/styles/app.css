@@ -25,7 +25,7 @@ button, input, textarea, select {
 
 .shell {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: var(--rail-w, 260px) 1fr;
   grid-template-rows: 1fr auto 22px;
   grid-template-areas:
     "rail   work"
@@ -46,7 +46,7 @@ button, input, textarea, select {
 .rail {
   grid-area: rail;
   background: var(--bg-panel);
-  border-right: 1px solid var(--line-default);
+  position: relative;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -220,12 +220,15 @@ button, input, textarea, select {
 
 .editor-wrap {
   padding: 12px;
-  border-bottom: 1px solid var(--line-default);
   background: var(--bg-app);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 .editor {
   width: 100%;
-  min-height: 140px;
+  flex: 1;
+  min-height: 0;
   background: var(--bg-input);
   border: 1px solid var(--line-default);
   border-radius: var(--r-md);
@@ -233,7 +236,7 @@ button, input, textarea, select {
   font-family: var(--font-mono);
   font-size: var(--fs-base);
   padding: 10px 12px;
-  resize: vertical;
+  resize: none;
   line-height: 1.5;
 }
 .editor:focus {
@@ -403,3 +406,49 @@ button, input, textarea, select {
   max-height: 200px;
   overflow: auto;
 }
+
+/* ── Splitters ─────────────────────────────────────────────────── */
+
+.splitter {
+  position: relative;
+  z-index: 2;
+  background: transparent;
+  touch-action: none;
+}
+.splitter-v { cursor: col-resize; }
+.splitter-h { cursor: row-resize; }
+.splitter::after {
+  content: "";
+  position: absolute;
+  background: var(--line-default);
+  pointer-events: none;
+  transition: background 80ms ease, box-shadow 80ms ease;
+}
+.splitter-v::after {
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 1px;
+}
+.splitter-h::after {
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 1px;
+}
+.splitter:hover::after { background: var(--line-strong); }
+.splitter.dragging::after {
+  background: var(--agent);
+  box-shadow: 0 0 0 1px var(--agent);
+}
+
+body.dragging-x,
+body.dragging-y {
+  user-select: none;
+  -webkit-user-select: none;
+}
+body.dragging-x { cursor: col-resize !important; }
+body.dragging-y { cursor: row-resize !important; }
+body.dragging-x *,
+body.dragging-y * { cursor: inherit !important; }

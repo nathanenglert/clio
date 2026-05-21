@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { api, onActivity, type ActivityEvent, type Connection } from "./lib/api";
 import { ConnectionRail } from "./components/ConnectionRail";
 import { SchemaTree } from "./components/SchemaTree";
@@ -6,6 +6,8 @@ import { Workspace } from "./components/Workspace";
 import { AgentSurface } from "./components/AgentSurface";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
+import { Splitter } from "./components/Splitter";
+import { useResizable } from "./lib/useResizable";
 
 export function App() {
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -15,6 +17,14 @@ export function App() {
   const [showMcp, setShowMcp] = useState(false);
   const [sql, setSql] = useState("SELECT now() AS server_time;");
   const [runTrigger, setRunTrigger] = useState(0);
+
+  const rail = useResizable({
+    storageKey: "db.layout.rail.width",
+    defaultSize: 260,
+    min: 200,
+    max: 480,
+    axis: "x",
+  });
 
   const refresh = async () => {
     try {
@@ -48,7 +58,10 @@ export function App() {
   };
 
   return (
-    <div className="shell">
+    <div
+      className="shell"
+      style={{ "--rail-w": `${rail.size}px` } as CSSProperties}
+    >
       <div className="rail">
         <ConnectionRail
           connections={connections}
@@ -60,6 +73,19 @@ export function App() {
         <SchemaTree
           connectionName={active && active.connected ? active.name : null}
           onPickTable={onPickTable}
+        />
+        <Splitter
+          orientation="vertical"
+          dragging={rail.dragging}
+          title="Drag to resize · double-click to reset"
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            right: 0,
+            width: 6,
+          }}
+          {...rail.handleProps}
         />
       </div>
       <div className="work">

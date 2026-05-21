@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type Connection, type QueryResult } from "../lib/api";
+import { Splitter } from "./Splitter";
+import { useResizable } from "../lib/useResizable";
 
 type Props = {
   active: Connection | null;
@@ -14,6 +16,14 @@ export function Workspace({ active, sql, setSql, onOpenMcpModal, runTrigger }: P
   const [result, setResult] = useState<QueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+
+  const editor = useResizable({
+    storageKey: "db.layout.editor.height",
+    defaultSize: 220,
+    min: 150,
+    max: 600,
+    axis: "y",
+  });
 
   const run = async () => {
     if (!active || !active.connected) {
@@ -93,7 +103,10 @@ export function Workspace({ active, sql, setSql, onOpenMcpModal, runTrigger }: P
         </button>
       </div>
 
-      <div className="editor-wrap">
+      <div
+        className="editor-wrap"
+        style={{ height: editor.size, flex: "0 0 auto" }}
+      >
         <textarea
           /* Monaco seam: replace this <textarea> with a Monaco editor instance.
              Keep value/onChange semantics; the rest of the app is editor-agnostic. */
@@ -114,6 +127,13 @@ export function Workspace({ active, sql, setSql, onOpenMcpModal, runTrigger }: P
           {error && <span className="editor-error">{error}</span>}
         </div>
       </div>
+      <Splitter
+        orientation="horizontal"
+        dragging={editor.dragging}
+        title="Drag to resize · double-click to reset"
+        style={{ flex: "0 0 6px", height: 6, margin: "-3px 0" }}
+        {...editor.handleProps}
+      />
 
       <div className="grid-wrap">
         {result ? (
