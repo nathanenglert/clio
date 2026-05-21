@@ -4,6 +4,11 @@ dist
 src-tauri/target
 src-tauri/gen
 
+# TypeScript incremental + compiled vite config
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
 # ── Editor / IDE ────────────────────────────────────────────────
 .vscode/
 .idea/
