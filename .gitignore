@@ -27,6 +27,8 @@ Thumbs.db
 .dbapp/
 *.env.local
 .env
+# Claude Code agent runtime state (scheduled task locks, etc.)
+.claude/
 
 # ── Secrets ─────────────────────────────────────────────────────
 # Defensive: never commit credentials. The keychain is the source

@@ -1,22 +1,33 @@
-import { useEffect, useRef, useState } from "react";
-import { api, type Connection, type QueryResult } from "../lib/api";
+import { type Connection } from "../lib/api";
 import { Splitter } from "./Splitter";
+import { TabBar } from "./TabBar";
+import { SqlEditor } from "./SqlEditor";
 import { useResizable } from "../lib/useResizable";
+import type { Tab } from "../lib/useTabs";
 
 type Props = {
   active: Connection | null;
-  sql: string;
-  setSql: (s: string) => void;
+  tabs: Tab[];
+  activeTab: Tab | null;
+  onSelectTab: (id: string) => void;
+  onCloseTab: (id: string) => void;
+  onAddTab: () => void;
+  onSqlChange: (id: string, sql: string) => void;
+  onRun: () => void;
   onOpenMcpModal: () => void;
-  /** Bumped by App when an external surface (e.g. AgentSurface) wants a re-run. */
-  runTrigger?: number;
 };
 
-export function Workspace({ active, sql, setSql, onOpenMcpModal, runTrigger }: Props) {
-  const [result, setResult] = useState<QueryResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
-
+export function Workspace({
+  active,
+  tabs,
+  activeTab,
+  onSelectTab,
+  onCloseTab,
+  onAddTab,
+  onSqlChange,
+  onRun,
+  onOpenMcpModal,
+}: Props) {
   const editor = useResizable({
     storageKey: "db.layout.editor.height",
     defaultSize: 220,
@@ -25,108 +36,78 @@ export function Workspace({ active, sql, setSql, onOpenMcpModal, runTrigger }: P
     axis: "y",
   });
 
-  const run = async () => {
-    if (!active || !active.connected) {
-      setError("Not connected. Click a connection in the rail.");
-      return;
-    }
-    setError(null);
-    setRunning(true);
-    try {
-      const r = await api.run_query(active.name, sql);
-      setResult(r);
-    } catch (e) {
-      setError(String(e));
-      setResult(null);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  // Always-fresh reference to `run` so the trigger effect fires the latest closure.
-  const runRef = useRef(run);
-  runRef.current = run;
-
-  useEffect(() => {
-    if (!runTrigger) return;
-    runRef.current();
-  }, [runTrigger]);
-
-  const onEditorKey = (e: React.KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-      e.preventDefault();
-      run();
-    }
-  };
-
   if (!active) {
     return (
-      <>
-        <div className="tabbar">
-          <span className="conn-tag">no connection</span>
-          <div className="spacer" />
-          <button className="btn" onClick={onOpenMcpModal}>
-            MCP config
-          </button>
+      <div className="empty-pane">
+        <div className="serif" style={{ fontSize: "var(--fs-xl)" }}>
+          A workbench you watch from.
         </div>
-        <div className="empty-pane">
-          <div className="serif" style={{ fontSize: "var(--fs-xl)" }}>
-            A workbench you watch from.
-          </div>
-          <div>Add a connection in the rail, then click it to connect.</div>
-        </div>
-      </>
-    );
-  }
-
-  return (
-    <>
-      <div className="tabbar">
-        <span className="conn-tag">
-          <span
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: 50,
-              background: active.connected ? "var(--status-ok)" : "var(--status-idle)",
-              display: "inline-block",
-            }}
-          />
-          {active.name}
-          <span style={{ color: "var(--text-muted)" }}>
-            · {active.username}@{active.host}:{active.port}/{active.database}
-          </span>
-        </span>
-        <div className="spacer" />
-        <button className="btn" onClick={onOpenMcpModal}>
+        <div>Add a connection in the rail, then click it to connect.</div>
+        <button className="btn" onClick={onOpenMcpModal} style={{ marginTop: 12 }}>
           MCP config
         </button>
       </div>
+    );
+  }
+
+  const result = activeTab?.result ?? null;
+  const error = activeTab?.error ?? null;
+  const running = activeTab?.running ?? false;
+  const isAgentTab = activeTab?.agentAuthored ?? false;
+
+  return (
+    <>
+      <TabBar
+        tabs={tabs}
+        activeId={activeTab?.id ?? null}
+        onSelect={onSelectTab}
+        onClose={onCloseTab}
+        onAdd={onAddTab}
+      />
+
+      <div className="editor-toolbar">
+        <button
+          className="run-chip"
+          onClick={onRun}
+          disabled={running || !active.connected || !activeTab}
+          aria-label="Run query"
+        >
+          <span className="run-icon" aria-hidden>▶</span>
+          <span>{running ? "Running…" : "Run"}</span>
+          <kbd className="kbd">⌘↵</kbd>
+        </button>
+        <button className="editor-btn" disabled title="Format SQL (coming soon)">
+          Format <kbd className="kbd">⌥⇧F</kbd>
+        </button>
+        <button className="editor-btn" disabled title="EXPLAIN (coming soon)">
+          EXPLAIN
+        </button>
+        <div className="spacer" />
+        {isAgentTab && (
+          <span className="agent-badge">
+            <span className="agent-dot" />
+            written by agent
+          </span>
+        )}
+        <button className="editor-btn ghost" onClick={onOpenMcpModal}>
+          MCP
+        </button>
+        <span className="editor-meta mono">SQL · UTF-8 · LF</span>
+      </div>
 
       <div
-        className="editor-wrap"
+        className={`editor-wrap${isAgentTab ? " agent" : ""}`}
         style={{ height: editor.size, flex: "0 0 auto" }}
       >
-        <textarea
-          /* Monaco seam: replace this <textarea> with a Monaco editor instance.
-             Keep value/onChange semantics; the rest of the app is editor-agnostic. */
-          className="editor"
-          value={sql}
-          onChange={(e) => setSql(e.target.value)}
-          onKeyDown={onEditorKey}
-          spellCheck={false}
-          placeholder="SELECT 1;"
-        />
-        <div className="editor-row">
-          <button className="btn primary" onClick={run} disabled={running || !active.connected}>
-            {running ? "Running…" : "Run  ⌘↵"}
-          </button>
-          <span style={{ color: "var(--text-muted)", fontSize: "var(--fs-xs)" }}>
-            SELECT / WITH-SELECT only · writes are blocked at the seam (v0.2)
-          </span>
-          {error && <span className="editor-error">{error}</span>}
-        </div>
+        {activeTab && (
+          <SqlEditor
+            value={activeTab.sql}
+            onChange={(v) => onSqlChange(activeTab.id, v)}
+            onRun={onRun}
+          />
+        )}
       </div>
+
       <Splitter
         orientation="horizontal"
         dragging={editor.dragging}
@@ -135,8 +116,33 @@ export function Workspace({ active, sql, setSql, onOpenMcpModal, runTrigger }: P
         {...editor.handleProps}
       />
 
-      <div className="grid-wrap">
+      <div className="result-toolbar">
         {result ? (
+          <>
+            <span className="status-pill ok mono">
+              {result.row_count} row{result.row_count === 1 ? "" : "s"} · {result.elapsed_ms}ms
+              {result.truncated && " · truncated"}
+            </span>
+            <span className="result-sep">│</span>
+            <span className="result-sql mono" title={activeTab?.sql ?? ""}>
+              {(activeTab?.sql ?? "").replace(/\s+/g, " ").trim().slice(0, 120)}
+            </span>
+          </>
+        ) : error ? (
+          <span className="status-pill err mono">{error}</span>
+        ) : (
+          <span className="result-empty mono">
+            No results yet. ⌘↵ to run.
+          </span>
+        )}
+        <div className="spacer" />
+        <button className="editor-btn" disabled>Filter</button>
+        <button className="editor-btn" disabled>Export</button>
+        <button className="editor-btn" disabled aria-label="Refresh">↻</button>
+      </div>
+
+      <div className="grid-wrap">
+        {result && (
           <table className="grid">
             <thead>
               <tr>
@@ -157,20 +163,8 @@ export function Workspace({ active, sql, setSql, onOpenMcpModal, runTrigger }: P
               ))}
             </tbody>
           </table>
-        ) : (
-          <div className="empty-pane" style={{ padding: 24 }}>
-            <div style={{ color: "var(--text-muted)" }}>
-              No results yet. ⌘↵ to run.
-            </div>
-          </div>
         )}
       </div>
-      {result && (
-        <div className="grid-meta">
-          {result.row_count} row{result.row_count === 1 ? "" : "s"} · {result.elapsed_ms}ms
-          {result.truncated && " · truncated"}
-        </div>
-      )}
     </>
   );
 }

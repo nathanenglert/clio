@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { api, onActivity, type ActivityEvent, type Connection } from "./lib/api";
 import { ConnectionRail } from "./components/ConnectionRail";
 import { SchemaTree } from "./components/SchemaTree";
@@ -8,6 +8,7 @@ import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 import { Splitter } from "./components/Splitter";
 import { useResizable } from "./lib/useResizable";
+import { useTabs } from "./lib/useTabs";
 
 export function App() {
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -15,8 +16,6 @@ export function App() {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
-  const [sql, setSql] = useState("SELECT now() AS server_time;");
-  const [runTrigger, setRunTrigger] = useState(0);
 
   const rail = useResizable({
     storageKey: "db.layout.rail.width",
@@ -40,7 +39,6 @@ export function App() {
     refresh();
     const unlisten = onActivity((e) => {
       setEvents((prev) => [...prev.slice(-199), e]);
-      // Connection-state-changing tools should refresh the rail
       if (e.tool === "connect" || e.tool === "disconnect" || e.tool === "add_connection" || e.tool === "delete_connection") {
         refresh();
       }
@@ -52,9 +50,57 @@ export function App() {
   }, []);
 
   const active = connections.find((c) => c.name === activeName) ?? null;
+  const tabs = useTabs(activeName);
+
+  // The agent dock should only show the agent's work; user-initiated activity
+  // is surfaced separately (History tab). See design/README.md §"Agent activity
+  // surface": "There must never be a moment of doubt about who initiated what."
+  const agentEvents = useMemo(
+    () => events.filter((e) => e.source === "mcp"),
+    [events],
+  );
+  // run_query events from both sources — surfaced as History so the user can
+  // re-run their own past queries alongside the agent's.
+  const recentQueries = useMemo(
+    () => events.filter((e) => e.tool === "run_query"),
+    [events],
+  );
+
+  const runActive = useCallback(async () => {
+    const tab = tabs.activeTab;
+    if (!tab || !activeName) return;
+    if (!active?.connected) {
+      tabs.updateTab(tab.id, { error: "Not connected. Click a connection in the rail.", result: null });
+      return;
+    }
+    tabs.updateTab(tab.id, { running: true, error: null });
+    try {
+      const result = await api.run_query(activeName, tab.sql);
+      tabs.updateTab(tab.id, { result, running: false, dirty: false });
+    } catch (e) {
+      tabs.updateTab(tab.id, { error: String(e), running: false, result: null });
+    }
+  }, [tabs, activeName, active?.connected]);
 
   const onPickTable = (schema: string, table: string) => {
-    setSql(`SELECT *\nFROM ${schema}.${table}\nLIMIT 100;`);
+    tabs.openOrSwitchTable(schema, table);
+  };
+
+  const onAgentOpen = (sql: string) => {
+    tabs.addAgentTab(sql);
+  };
+
+  const onAgentRerun = async (sql: string) => {
+    const id = tabs.addAgentTab(sql);
+    if (!id || !activeName || !active?.connected) return;
+    // The new tab is now active; run it directly.
+    tabs.updateTab(id, { running: true, error: null });
+    try {
+      const result = await api.run_query(activeName, sql);
+      tabs.updateTab(id, { result, running: false, dirty: false });
+    } catch (e) {
+      tabs.updateTab(id, { error: String(e), running: false, result: null });
+    }
   };
 
   return (
@@ -91,19 +137,21 @@ export function App() {
       <div className="work">
         <Workspace
           active={active}
-          sql={sql}
-          setSql={setSql}
+          tabs={tabs.tabs}
+          activeTab={tabs.activeTab}
+          onSelectTab={tabs.setActive}
+          onCloseTab={tabs.closeTab}
+          onAddTab={tabs.addScratchTab}
+          onSqlChange={(id, sql) => tabs.setSql(id, sql)}
+          onRun={runActive}
           onOpenMcpModal={() => setShowMcp(true)}
-          runTrigger={runTrigger}
         />
       </div>
       <AgentSurface
-        events={events}
-        onOpenSql={setSql}
-        onRerunSql={(s) => {
-          setSql(s);
-          setRunTrigger((n) => n + 1);
-        }}
+        events={agentEvents}
+        recentQueries={recentQueries}
+        onOpenSql={onAgentOpen}
+        onRerunSql={onAgentRerun}
       />
       <div className="status">
         <span>{connections.length} connection{connections.length === 1 ? "" : "s"}</span>
