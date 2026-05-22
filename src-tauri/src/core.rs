@@ -396,6 +396,13 @@ fn decode_cell(row: &sqlx::postgres::PgRow, idx: usize) -> Option<String> {
     if let Ok(s) = row.try_get::<String, _>(idx) {
         return Some(s);
     }
+    // User-defined enums and other text-shaped types: Postgres transmits the
+    // label as UTF-8 bytes in both text and binary modes, so decode directly.
+    if let Ok(bytes) = raw.as_bytes() {
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            return Some(s.to_string());
+        }
+    }
     Some(format!("<{type_name}>"))
 }
 
