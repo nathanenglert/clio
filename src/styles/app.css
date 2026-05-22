@@ -501,6 +501,9 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   min-height: 0;
   background: var(--bg-app);
 }
+.grid-wrap:focus {
+  outline: none;
+}
 .grid {
   width: 100%;
   border-collapse: collapse;

@@ -55,26 +55,22 @@ export function ResultsGrid(props: Props) {
   // Keyboard: ⌘N starts add, Delete deletes selected row.
   const [selectedRow, setSelectedRow] = useState<number | null>(null);
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      // Don't intercept while editing or when focus is in an input.
-      const tgt = e.target as HTMLElement | null;
-      if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
-      if (editing) return;
-      if (!editable) return;
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "n") {
-        e.preventDefault();
-        onStartAdd();
-        return;
-      }
-      if ((e.key === "Backspace" || e.key === "Delete") && selectedRow !== null) {
-        e.preventDefault();
-        onStageDelete(selectedRow);
-      }
+  function onGridKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    // Bail when a cell editor input/textarea is focused inside the grid.
+    const tgt = e.target as HTMLElement | null;
+    if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
+    if (editing) return;
+    if (!editable) return;
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "n") {
+      e.preventDefault();
+      onStartAdd();
+      return;
     }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [editing, editable, selectedRow, onStartAdd, onStageDelete]);
+    if ((e.key === "Backspace" || e.key === "Delete") && selectedRow !== null) {
+      e.preventDefault();
+      onStageDelete(selectedRow);
+    }
+  }
 
   const colTypeByName = useMemo(() => {
     const m = new Map<string, ColumnDescription>();
@@ -94,7 +90,7 @@ export function ResultsGrid(props: Props) {
   }
 
   return (
-    <div className="grid-wrap" ref={wrapRef}>
+    <div className="grid-wrap" ref={wrapRef} tabIndex={-1} onKeyDown={onGridKeyDown}>
       {!editable && (
         <ReadOnlyBanner reason={readOnlyReason ?? "ad-hoc SQL — open via schema tree to edit"} />
       )}
@@ -132,7 +128,10 @@ export function ResultsGrid(props: Props) {
                 ]
                   .filter(Boolean)
                   .join(" ")}
-                onClick={() => setSelectedRow(ri)}
+                onClick={() => {
+                  setSelectedRow(ri);
+                  wrapRef.current?.focus();
+                }}
               >
                 <td className="grid-rownum">
                   {deleted ? (
