@@ -52,6 +52,13 @@ pub struct QueryResult {
     pub elapsed_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportResult {
+    pub row_count: usize,
+    pub elapsed_ms: u64,
+    pub bytes_written: u64,
+}
+
 /// Emitted from core fns whenever a tool runs (UI- or MCP-initiated).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ActivityEvent {

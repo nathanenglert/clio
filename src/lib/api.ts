@@ -36,6 +36,12 @@ export type QueryResult = {
   elapsed_ms: number;
 };
 
+export type ExportResult = {
+  row_count: number;
+  elapsed_ms: number;
+  bytes_written: number;
+};
+
 export type ActivityEvent = {
   id: string;
   ts_ms: number;
@@ -91,6 +97,10 @@ export const api = {
     }),
   run_query: (connection: string, sql: string) =>
     invoke<QueryResult>("run_query", { connection, sql }),
+  export_query: (connection: string, sql: string, path: string, format: "csv" | "json") =>
+    invoke<ExportResult>("export_query", { connection, sql, path, format }),
+  write_file: (path: string, content: string) =>
+    invoke<number>("write_file", { path, content }),
   mcp_snippet: () => invoke<McpSnippet>("mcp_snippet"),
 };
 

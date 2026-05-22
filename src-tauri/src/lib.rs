@@ -73,6 +73,24 @@ async fn run_query(state: State<'_, Core>, connection: String, sql: String) -> R
 }
 
 #[tauri::command]
+async fn export_query(
+    state: State<'_, Core>,
+    connection: String,
+    sql: String,
+    path: String,
+    format: String,
+) -> Result<ExportResult, String> {
+    core::export_query(&state, &connection, &sql, &path, &format)
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
+fn write_file(path: String, content: String) -> Result<u64, String> {
+    core::write_file(&path, content.as_bytes()).map_err(format_err)
+}
+
+#[tauri::command]
 fn mcp_snippet() -> Result<McpSnippet, String> {
     let path = std::env::current_exe()
         .map_err(|e| e.to_string())?
@@ -144,6 +162,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
             // Build Core synchronously on the async runtime, then manage it
@@ -175,6 +194,8 @@ pub fn run() {
             list_tables,
             describe_table,
             run_query,
+            export_query,
+            write_file,
             mcp_snippet,
         ])
         .run(tauri::generate_context!())

@@ -7,6 +7,7 @@ import { AgentSurface } from "./components/AgentSurface";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 import { Splitter } from "./components/Splitter";
+import { ToastHost } from "./components/Toast";
 import { useResizable } from "./lib/useResizable";
 import { useTabs } from "./lib/useTabs";
 
@@ -169,6 +170,7 @@ export function App() {
         />
       )}
       {showMcp && <McpConfigModal onClose={() => setShowMcp(false)} />}
+      <ToastHost />
     </div>
   );
 }

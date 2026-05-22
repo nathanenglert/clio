@@ -1,7 +1,9 @@
+import { useEffect, useState } from "react";
 import { type Connection } from "../lib/api";
 import { Splitter } from "./Splitter";
 import { TabBar } from "./TabBar";
 import { SqlEditor } from "./SqlEditor";
+import { ExportMenu } from "./ExportMenu";
 import { useResizable } from "../lib/useResizable";
 import type { Tab } from "../lib/useTabs";
 
@@ -35,6 +37,21 @@ export function Workspace({
     max: 600,
     axis: "y",
   });
+
+  // ⌘E opens the Export menu when results are loaded. The menu reacts to
+  // bumps on this counter (it ignores undefined → no-op on first render).
+  const [exportOpenSignal, setExportOpenSignal] = useState<number | undefined>(undefined);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        setExportOpenSignal((n) => (n ?? 0) + 1);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
 
   if (!active) {
     return (
@@ -140,10 +157,13 @@ export function Workspace({
           <span className="editor-btn-icon" aria-hidden>⏷</span>
           Filter
         </button>
-        <button className="editor-btn" disabled>
-          <span className="editor-btn-icon" aria-hidden>↥</span>
-          Export
-        </button>
+        <ExportMenu
+          result={result}
+          sql={activeTab?.sql ?? ""}
+          tabTitle={activeTab?.title ?? "query"}
+          connectionName={active.name}
+          openSignal={exportOpenSignal}
+        />
         <button className="editor-btn" disabled aria-label="Refresh">↻</button>
       </div>
 
