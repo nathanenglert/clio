@@ -568,6 +568,7 @@ button, input, textarea, select {
   color: var(--text-faint);
   padding: 7px 8px;
   font-variant-numeric: tabular-nums;
+  position: relative;
 }
 
 .grid td.null { color: var(--text-faint); font-style: italic; }
@@ -972,13 +973,18 @@ body.dragging-y * { cursor: inherit !important; }
 .row-action-btn.destruct { color: var(--op-destruct); }
 .row-action-btn.write { color: var(--op-write); }
 .row-action-btn.delete-hover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   opacity: 0;
-  margin-left: 4px;
   color: var(--op-destruct);
 }
+.grid tbody tr:hover .row-num { opacity: 0; }
 .grid tbody tr:hover .row-action-btn.delete-hover { opacity: 0.7; }
 .row-action-btn.delete-hover:hover { opacity: 1; }
-.row-num { font-variant-numeric: tabular-nums; }
+.row-num { font-variant-numeric: tabular-nums; transition: opacity 80ms ease; }
 
 /* Inline cell editor */
 .cell-editing {
