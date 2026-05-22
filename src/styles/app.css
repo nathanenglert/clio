@@ -30,8 +30,8 @@ button, input, textarea, select {
   grid-template-areas:
     "titlebar titlebar"
     "rail     work"
-    "agent    agent"
     "tray     tray"
+    "agent    agent"
     "status   status";
   height: 100vh;
   width: 100vw;
