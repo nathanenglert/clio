@@ -6,10 +6,14 @@ import { Workspace } from "./components/Workspace";
 import { AgentSurface } from "./components/AgentSurface";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
+import { PendingTray } from "./components/PendingTray";
+import { ReviewModal } from "./components/ReviewModal";
 import { Splitter } from "./components/Splitter";
-import { ToastHost } from "./components/Toast";
+import { ToastHost, showToast } from "./components/Toast";
 import { useResizable } from "./lib/useResizable";
 import { useTabs } from "./lib/useTabs";
+import { useEditing } from "./lib/useEditing";
+import { isEmpty as batchIsEmpty } from "./lib/editing";
 
 export function App() {
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -52,6 +56,9 @@ export function App() {
 
   const active = connections.find((c) => c.name === activeName) ?? null;
   const tabs = useTabs(activeName);
+  const editing = useEditing(activeName);
+  const [showReview, setShowReview] = useState(false);
+  const [commitError, setCommitError] = useState<string | null>(null);
 
   // The agent dock should only show the agent's work; user-initiated activity
   // is surfaced separately (History tab). See design/README.md §"Agent activity
@@ -82,6 +89,59 @@ export function App() {
       tabs.updateTab(tab.id, { error: String(e), running: false, result: null });
     }
   }, [tabs, activeName, active?.connected]);
+
+  // ── Commit pending changes ─────────────────────────────────────
+  const trayTab = tabs.activeTab;
+  const trayBatch = trayTab ? editing.getBatch(trayTab.id) : null;
+  const trayActiveAdds = trayTab ? editing.getActiveAdds(trayTab.id) : [];
+  const hasTrayWork =
+    !!trayTab && (
+      !!trayBatch && !batchIsEmpty(trayBatch) ||
+      trayActiveAdds.some((a) => Object.keys(a.cells).length > 0)
+    );
+  const [traySchema, trayTable] = (trayTab?.schemaTableKey ?? ".").split(".");
+
+  const doCommit = useCallback(async () => {
+    if (!trayTab || !traySchema || !trayTable) return;
+    setCommitError(null);
+    const outcome = await editing.commit({
+      id: trayTab.id,
+      schema: traySchema,
+      table: trayTable,
+      result: trayTab.result,
+    });
+    if (!outcome) return;
+    if (outcome.committed) {
+      setShowReview(false);
+      showToast(
+        `Committed ${outcome.statements_run} statement${outcome.statements_run === 1 ? "" : "s"} · ${outcome.elapsed_ms}ms`,
+        "ok",
+      );
+      // Re-run the query to refresh the grid with post-commit data.
+      runActive();
+    } else {
+      setCommitError(outcome.error ?? "commit failed");
+      showToast("Commit failed — see banner above the tray", "err");
+    }
+  }, [trayTab, traySchema, trayTable, editing, runActive]);
+
+  const doDiscard = useCallback(() => {
+    if (!trayTab) return;
+    editing.discardAll(trayTab.id);
+    setCommitError(null);
+  }, [trayTab, editing]);
+
+  // ⌘⏎ commits when the tray is non-empty.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && hasTrayWork && !editing.busy) {
+        e.preventDefault();
+        doCommit();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [hasTrayWork, editing.busy, doCommit]);
 
   const onPickTable = (schema: string, table: string) => {
     tabs.openOrSwitchTable(schema, table);
@@ -149,6 +209,7 @@ export function App() {
           onSqlChange={(id, sql) => tabs.setSql(id, sql)}
           onRun={runActive}
           onOpenMcpModal={() => setShowMcp(true)}
+          editing={editing}
         />
       </div>
       <AgentSurface
@@ -157,6 +218,42 @@ export function App() {
         onOpenSql={onAgentOpen}
         onRerunSql={onAgentRerun}
       />
+      {hasTrayWork && trayBatch && trayTab && (
+        <>
+          {commitError && (
+            <div className="tray-error">
+              <span className="tray-error-icon" aria-hidden>⚠</span>
+              <span className="mono">{commitError}</span>
+              <div className="spacer" />
+              <button className="editor-btn ghost" onClick={() => setCommitError(null)}>
+                Dismiss
+              </button>
+            </div>
+          )}
+          <PendingTray
+            batch={trayBatch}
+            pendingAdds={trayActiveAdds.filter((a) => Object.keys(a.cells).length > 0).length}
+            table={trayTable || "?"}
+            connection={activeName || "?"}
+            busy={editing.busy}
+            onReview={() => setShowReview(true)}
+            onCommit={doCommit}
+            onDiscard={doDiscard}
+          />
+        </>
+      )}
+      {showReview && trayTab && trayBatch && (
+        <ReviewModal
+          batch={trayBatch}
+          activeAdds={trayActiveAdds}
+          schema={traySchema}
+          table={trayTable}
+          connection={activeName || "?"}
+          busy={editing.busy}
+          onClose={() => setShowReview(false)}
+          onCommit={doCommit}
+        />
+      )}
       <div className="status">
         <span>{connections.length} connection{connections.length === 1 ? "" : "s"}</span>
         <span>·</span>

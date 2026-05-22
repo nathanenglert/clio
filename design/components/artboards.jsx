@@ -223,6 +223,42 @@ const App = () => (
       </DCArtboard>
     </DCSection>
 
+    {/* ─── Result editing — staged transactional model ──────────── */}
+    <DCSection id="result-editing"
+      title="Result editing"
+      subtitle="Inline cell edit, add row, delete row. Staged locally; committed as one transaction. See result-editing.md.">
+      <DCArtboard id="editing-staged" label="E · Editable grid with staged changes"
+        width={W_FULL} height={H_FULL}>
+        <FullShell agentVariant="right-dock"
+          pendingTray={<PendingTray edits={2} adds={1} deletes={1} />}
+        >
+          <TabBar tabs={DEFAULT_TABS} active={0} />
+          <QueryEditor lines={DEFAULT_QUERY} height={170} />
+          <EditableResultsGrid />
+        </FullShell>
+      </DCArtboard>
+      <DCArtboard id="editing-readonly" label="F · Read-only result — joins or no PK"
+        width={W_FULL} height={H_FULL}>
+        <FullShell agentVariant="right-dock">
+          <TabBar tabs={DEFAULT_TABS} active={0} />
+          <QueryEditor lines={DEFAULT_QUERY} height={170} />
+          <ReadOnlyBanner reason="spans multiple tables" />
+          <ResultsGrid />
+        </FullShell>
+      </DCArtboard>
+      <DCArtboard id="editing-review" label="G · Review SQL · before commit"
+        width={W_FULL} height={H_FULL}>
+        <FullShell agentVariant="right-dock"
+          pendingTray={<PendingTray edits={2} adds={1} deletes={1} />}
+          overlay={{ node: <ReviewModal /> }}
+        >
+          <TabBar tabs={DEFAULT_TABS} active={0} />
+          <QueryEditor lines={DEFAULT_QUERY} height={170} />
+          <EditableResultsGrid />
+        </FullShell>
+      </DCArtboard>
+    </DCSection>
+
     {/* ─── Agent activity surface — 3 directions ────────────────── */}
     <DCSection id="agent-dock"
       title="Agent activity surface · A · Right dock"

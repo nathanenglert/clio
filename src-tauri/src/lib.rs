@@ -73,6 +73,17 @@ async fn run_query(state: State<'_, Core>, connection: String, sql: String) -> R
 }
 
 #[tauri::command]
+async fn apply_mutations(
+    state: State<'_, Core>,
+    connection: String,
+    batch: MutationBatch,
+) -> Result<MutationOutcome, String> {
+    core::apply_mutations(&state, &connection, batch)
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
 async fn export_query(
     state: State<'_, Core>,
     connection: String,
@@ -201,6 +212,7 @@ pub fn run() {
             list_tables,
             describe_table,
             run_query,
+            apply_mutations,
             export_query,
             write_file,
             mcp_snippet,

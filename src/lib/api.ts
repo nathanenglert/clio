@@ -54,6 +54,45 @@ export type ActivityEvent = {
   payload?: string;
 };
 
+// ── Mutation batch (staged editing) ──────────────────────────────
+// Mirrors src-tauri/src/types.rs. Submitted to the Tauri-only apply_mutations
+// command. NOT exposed via MCP — humans only. See design/result-editing.md.
+
+export type MutationCol = [string, string | null];
+
+export type MutationOp =
+  | {
+      kind: "update";
+      schema: string;
+      table: string;
+      pk: MutationCol[];
+      set: MutationCol[];
+    }
+  | {
+      kind: "insert";
+      schema: string;
+      table: string;
+      values: MutationCol[];
+    }
+  | {
+      kind: "delete";
+      schema: string;
+      table: string;
+      pk: MutationCol[];
+    };
+
+export type MutationBatch = {
+  ops: MutationOp[];
+};
+
+export type MutationOutcome = {
+  committed: boolean;
+  statements_run: number;
+  elapsed_ms: number;
+  error: string | null;
+  error_at: number | null;
+};
+
 export type McpTarget = {
   key: string;
   label: string;
@@ -97,6 +136,8 @@ export const api = {
     }),
   run_query: (connection: string, sql: string) =>
     invoke<QueryResult>("run_query", { connection, sql }),
+  apply_mutations: (connection: string, batch: MutationBatch) =>
+    invoke<MutationOutcome>("apply_mutations", { connection, batch }),
   export_query: (connection: string, sql: string, path: string, format: "csv" | "json") =>
     invoke<ExportResult>("export_query", { connection, sql, path, format }),
   write_file: (path: string, content: string) =>

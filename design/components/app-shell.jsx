@@ -26,6 +26,8 @@ const FullShell = ({
   awaitingApproval = false,
   // overlay
   overlay = null,
+  // pending-changes tray (above status bar)
+  pendingTray = null,
   // status
   agentActive = true,
   queued = null,
@@ -150,6 +152,8 @@ const FullShell = ({
       {/* bottom agent surfaces */}
       {agentVariant === 'bottom-strip'  && <AgentStripBottom awaiting={awaitingApproval} />}
       {agentVariant === 'bottom-drawer' && <AgentDrawerBottom />}
+
+      {pendingTray}
 
       <StatusBar agentActive={agentActive} queued={queued} />
 

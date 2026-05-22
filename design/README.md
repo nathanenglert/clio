@@ -359,6 +359,8 @@ Click or `⏎` to edit a cell:
 
 **The implied SQL preview is non-negotiable.** Users must always know what the edit will become. This is the "no surprise writes" contract applied to direct edits.
 
+See **[`result-editing.md`](result-editing.md)** for the full editing model: when the grid is editable, dirty-cell stripe, add row, delete row, the pending-changes tray, the review-SQL modal, type-aware editors, and the backend transactional contract.
+
 ### JSON sidebar (jsonb viewer)
 
 Right-side panel, 320px, toggleable with `⌘⇧J`.
@@ -795,6 +797,7 @@ Pure function: `(rule[], sql, target) → 'allow' | 'prompt' | 'block'`. Unit-te
 ```
 design_handoff_database_app/
 ├─ README.md                      ← this file
+├─ result-editing.md              ← inline editing model (staged tray, add/delete row, review modal)
 ├─ Database App.html              ← the design canvas — open this first
 ├─ design-canvas.jsx              ← canvas host (DesignCanvas / DCSection / DCArtboard)
 ├─ styles/
@@ -804,6 +807,7 @@ design_handoff_database_app/
    ├─ primitives.jsx              ← Icon, OpGlyph, WindowChrome, AgentBadge, Kbd, Pin
    ├─ data.jsx                    ← fake schema + rows + agent log for the mocks
    ├─ surfaces.jsx                ← SchemaTree, TabBar, QueryEditor, ResultsGrid, StatusBar
+   ├─ editing.jsx                 ← EditableResultsGrid, PendingTray, ReviewModal, ReadOnlyBanner
    ├─ agent.jsx                   ← AgentDockRight, AgentStripBottom, AgentDrawerBottom,
    │                                AgentRail, AgentFocus, StreamRow, PermissionCard
    ├─ overlays.jsx                ← CommandPalette, ConnectionManager, PolicyEditor,

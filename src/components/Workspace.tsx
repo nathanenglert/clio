@@ -4,8 +4,10 @@ import { Splitter } from "./Splitter";
 import { TabBar } from "./TabBar";
 import { SqlEditor } from "./SqlEditor";
 import { ExportMenu } from "./ExportMenu";
+import { ResultsGrid } from "./ResultsGrid";
 import { useResizable } from "../lib/useResizable";
 import type { Tab } from "../lib/useTabs";
+import type { useEditing } from "../lib/useEditing";
 
 type Props = {
   active: Connection | null;
@@ -17,6 +19,8 @@ type Props = {
   onSqlChange: (id: string, sql: string) => void;
   onRun: () => void;
   onOpenMcpModal: () => void;
+  /** Editing state hook (App-owned). */
+  editing: ReturnType<typeof useEditing>;
 };
 
 export function Workspace({
@@ -29,6 +33,7 @@ export function Workspace({
   onSqlChange,
   onRun,
   onOpenMcpModal,
+  editing,
 }: Props) {
   const editor = useResizable({
     storageKey: "db.layout.editor.height",
@@ -38,8 +43,7 @@ export function Workspace({
     axis: "y",
   });
 
-  // ⌘E opens the Export menu when results are loaded. The menu reacts to
-  // bumps on this counter (it ignores undefined → no-op on first render).
+  // ⌘E opens the Export menu when results are loaded.
   const [exportOpenSignal, setExportOpenSignal] = useState<number | undefined>(undefined);
 
   useEffect(() => {
@@ -52,6 +56,16 @@ export function Workspace({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, []);
+
+  // For editable tabs: fetch describe_table on demand.
+  const isTableTab = activeTab?.source === "table" && !!activeTab.schemaTableKey;
+  const [schema, table] = (activeTab?.schemaTableKey ?? ".").split(".");
+  const editable = !!(active?.connected && isTableTab && activeTab?.result);
+
+  useEffect(() => {
+    if (!isTableTab || !schema || !table) return;
+    editing.ensureMeta(schema, table);
+  }, [isTableTab, schema, table, editing]);
 
   if (!active) {
     return (
@@ -71,6 +85,13 @@ export function Workspace({
   const error = activeTab?.error ?? null;
   const running = activeTab?.running ?? false;
   const isAgentTab = activeTab?.agentAuthored ?? false;
+  const columnsMeta = isTableTab && schema && table ? editing.getMeta(schema, table) : null;
+  const batch = activeTab ? editing.getBatch(activeTab.id) : { edits: [], adds: [], deletes: [] };
+  const activeAdds = activeTab ? editing.getActiveAdds(activeTab.id) : [];
+
+  const editableTab = editable && activeTab && schema && table
+    ? { id: activeTab.id, schema, table, result }
+    : null;
 
   return (
     <>
@@ -157,6 +178,16 @@ export function Workspace({
           <span className="editor-btn-icon" aria-hidden>⏷</span>
           Filter
         </button>
+        {editable && (
+          <button
+            className="editor-btn write"
+            onClick={() => editableTab && editing.startAdd(editableTab)}
+            title="Add a new row (⌘N)"
+          >
+            <span className="editor-btn-icon" aria-hidden>+</span>
+            Row
+          </button>
+        )}
         <ExportMenu
           result={result}
           sql={activeTab?.sql ?? ""}
@@ -167,48 +198,31 @@ export function Workspace({
         <button className="editor-btn" disabled aria-label="Refresh">↻</button>
       </div>
 
-      <div className="grid-wrap">
-        {result && (
-          <table className="grid">
-            <thead>
-              <tr>
-                <th className="grid-rownum" aria-label="row number">#</th>
-                {result.columns.map((c) => (
-                  <th key={c.name}>
-                    <div className="th-content">
-                      <span className="grid-col-name">{c.name}</span>
-                      <span className="grid-col-type mono">{c.data_type}</span>
-                    </div>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {result.rows.map((row, i) => (
-                <tr key={i}>
-                  <td className="grid-rownum">{i + 1}</td>
-                  {row.map((v, j) => {
-                    const t = result.columns[j]?.data_type ?? "";
-                    const isNull = v === null;
-                    const isJson = t === "jsonb" || t === "json";
-                    const cls = [
-                      isNull ? "null" : "",
-                      isJson ? "json" : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ");
-                    return (
-                      <td key={j} className={cls}>
-                        {isNull ? "null" : v}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      <ResultsGrid
+        result={result}
+        error={error}
+        editable={editable}
+        readOnlyReason={
+          !active.connected
+            ? "not connected"
+            : !isTableTab
+            ? "ad-hoc SQL — open via schema tree to edit"
+            : !result
+            ? "no result yet"
+            : undefined
+        }
+        columnsMeta={columnsMeta}
+        batch={batch}
+        activeAdds={activeAdds}
+        onStageEdit={(rowIdx, col, value) => editableTab && editing.stageEditCell(editableTab, rowIdx, col, value)}
+        onStageDelete={(rowIdx) => editableTab && editing.stageDeleteRow(editableTab, rowIdx)}
+        onUndoDelete={(rowIdx) => editableTab && editing.undoDeleteRow(editableTab, rowIdx)}
+        onCancelAdd={(tempId) => activeTab && editing.cancelActiveAdd(activeTab.id, tempId)}
+        onUpdateActiveAdd={(tempId, col, value) =>
+          activeTab && editing.updateActiveAdd(activeTab.id, tempId, col, value)
+        }
+        onStartAdd={() => editableTab && editing.startAdd(editableTab)}
+      />
     </>
   );
 }
