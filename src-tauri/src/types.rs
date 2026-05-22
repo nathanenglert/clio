@@ -38,8 +38,14 @@ pub struct ColumnDescription {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ColumnMeta {
+    pub name: String,
+    pub data_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct QueryResult {
-    pub columns: Vec<String>,
+    pub columns: Vec<ColumnMeta>,
     pub rows: Vec<Vec<Option<String>>>,
     pub row_count: usize,
     pub truncated: bool,

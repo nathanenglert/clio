@@ -136,8 +136,14 @@ export function Workspace({
           </span>
         )}
         <div className="spacer" />
-        <button className="editor-btn" disabled>Filter</button>
-        <button className="editor-btn" disabled>Export</button>
+        <button className="editor-btn" disabled>
+          <span className="editor-btn-icon" aria-hidden>⏷</span>
+          Filter
+        </button>
+        <button className="editor-btn" disabled>
+          <span className="editor-btn-icon" aria-hidden>↥</span>
+          Export
+        </button>
         <button className="editor-btn" disabled aria-label="Refresh">↻</button>
       </div>
 
@@ -146,19 +152,37 @@ export function Workspace({
           <table className="grid">
             <thead>
               <tr>
+                <th className="grid-rownum" aria-label="row number">#</th>
                 {result.columns.map((c) => (
-                  <th key={c}>{c}</th>
+                  <th key={c.name}>
+                    <div className="th-content">
+                      <span className="grid-col-name">{c.name}</span>
+                      <span className="grid-col-type mono">{c.data_type}</span>
+                    </div>
+                  </th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {result.rows.map((row, i) => (
                 <tr key={i}>
-                  {row.map((v, j) => (
-                    <td key={j} className={v === null ? "null" : ""}>
-                      {v === null ? "NULL" : v}
-                    </td>
-                  ))}
+                  <td className="grid-rownum">{i + 1}</td>
+                  {row.map((v, j) => {
+                    const t = result.columns[j]?.data_type ?? "";
+                    const isNull = v === null;
+                    const isJson = t === "jsonb" || t === "json";
+                    const cls = [
+                      isNull ? "null" : "",
+                      isJson ? "json" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ");
+                    return (
+                      <td key={j} className={cls}>
+                        {isNull ? "null" : v}
+                      </td>
+                    );
+                  })}
                 </tr>
               ))}
             </tbody>

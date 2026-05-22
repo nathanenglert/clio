@@ -23,8 +23,13 @@ export type ColumnDescription = Column & {
   is_primary_key: boolean;
 };
 
+export type ColumnMeta = {
+  name: string;
+  data_type: string;
+};
+
 export type QueryResult = {
-  columns: string[];
+  columns: ColumnMeta[];
   rows: (string | null)[][];
   row_count: number;
   truncated: boolean;

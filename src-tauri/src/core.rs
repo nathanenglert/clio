@@ -6,7 +6,7 @@ use crate::activity::{record, record_with_payload, EmitFn};
 use crate::connections;
 use crate::pool::PoolRegistry;
 use crate::types::{
-    ColumnDescription, Connection, NewConnectionInput, QueryResult,
+    ColumnDescription, ColumnMeta, Connection, NewConnectionInput, QueryResult,
 };
 
 const ROW_CAP: usize = 1000;
@@ -290,9 +290,17 @@ pub async fn run_query(core: &Core, conn: &str, sql: &str) -> Result<QueryResult
             .fetch_all(&pool)
             .await
             .with_context(|| "query failed")?;
-        let columns: Vec<String> = rows
+        let columns: Vec<ColumnMeta> = rows
             .first()
-            .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
+            .map(|r| {
+                r.columns()
+                    .iter()
+                    .map(|c| ColumnMeta {
+                        name: c.name().to_string(),
+                        data_type: c.type_info().name().to_ascii_lowercase(),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         let truncated = rows.len() > ROW_CAP;

@@ -472,25 +472,77 @@ button, input, textarea, select {
   width: 100%;
   border-collapse: collapse;
   font-family: var(--font-mono);
-  font-size: var(--fs-sm);
+  font-size: 11.5px;
+  color: var(--text-primary);
 }
 .grid th, .grid td {
   text-align: left;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--line-faint);
   border-right: 1px solid var(--line-faint);
   white-space: nowrap;
-  color: var(--text-primary);
+  box-sizing: border-box;
+}
+.grid th {
+  padding: 7px 10px;
+  height: 28px;
+}
+.grid td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .grid thead th {
   position: sticky;
   top: 0;
+  z-index: 1;
   background: var(--bg-panel);
   color: var(--text-secondary);
-  font-weight: 500;
+  font-weight: 400;
+  font-size: 11px;
   border-bottom: 1px solid var(--line-default);
+  overflow: hidden;
 }
+.th-content {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 10px;
+  row-gap: 0;
+  height: 14px;
+  line-height: 14px;
+  overflow: hidden;
+}
+.grid-col-name {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.grid-col-type {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.grid tbody tr:nth-child(even) td:not(.grid-rownum) {
+  background: rgba(255, 240, 220, 0.012);
+}
+
+.grid th.grid-rownum,
+.grid td.grid-rownum {
+  width: 44px;
+  text-align: center;
+  color: var(--text-faint);
+  padding: 7px 8px;
+  font-variant-numeric: tabular-nums;
+}
+
 .grid td.null { color: var(--text-faint); font-style: italic; }
+.grid td.json { color: var(--op-ddl); }
 
 .empty-pane {
   flex: 1;
