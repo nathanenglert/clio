@@ -99,7 +99,7 @@ export function ResultsGrid(props: Props) {
         <ReadOnlyBanner reason={readOnlyReason ?? "ad-hoc SQL — open via schema tree to edit"} />
       )}
 
-      <table className="grid">
+      <table className={`grid${editable ? " editable" : ""}`}>
         <thead>
           <tr>
             <th className="grid-rownum" aria-label="row number">#</th>

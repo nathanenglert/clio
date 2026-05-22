@@ -128,6 +128,7 @@ export function ConnectionRail(props: Props) {
                   padding: "4px 8px 6px",
                   whiteSpace: "pre-wrap",
                   wordBreak: "break-word",
+                  cursor: "pointer",
                 }}
                 title="click to dismiss"
                 onClick={() =>

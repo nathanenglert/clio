@@ -17,6 +17,10 @@ button, input, textarea, select {
   color: inherit;
 }
 
+button, select { cursor: pointer; }
+button:disabled, select:disabled,
+input:disabled, textarea:disabled { cursor: not-allowed; }
+
 * {
   box-sizing: border-box;
 }
@@ -908,6 +912,12 @@ body.dragging-y * { cursor: inherit !important; }
   display: inline-block;
   margin: 0 2px;
   flex: 0 0 auto;
+}
+
+/* Editable cells: spreadsheet affordance on double-clickable data cells */
+.grid.editable tbody tr:not(.row-deleted):not(.row-add):not(.row-ghost)
+  td:not(.grid-rownum):not(.cell-editing) {
+  cursor: cell;
 }
 
 /* Dirty cell (staged edit) */
