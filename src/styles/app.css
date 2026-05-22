@@ -1097,6 +1097,21 @@ body.dragging-y * { cursor: inherit !important; }
   color: var(--op-write);
 }
 
+/* Enum dropdown */
+.cell-editor.enum select {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-size: 11.5px;
+  padding: 3px 2px;
+  outline: none;
+  min-width: 0;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  appearance: auto;
+}
+
 /* Pending tray region (above status bar): wraps optional error banner + tray */
 .tray-region {
   grid-area: tray;

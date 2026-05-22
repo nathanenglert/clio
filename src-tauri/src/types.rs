@@ -35,6 +35,17 @@ pub struct ColumnDescription {
     pub is_nullable: bool,
     pub default: Option<String>,
     pub is_primary_key: bool,
+    /// Schema-qualified underlying type name (e.g. "clinical.appointment_status").
+    /// Required when data_type is "USER-DEFINED" so the commit path can cast to
+    /// the real enum/domain/composite type instead of the literal string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udt_schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udt_name: Option<String>,
+    /// For columns typed as a Postgres enum: the enum's labels in
+    /// declared order. None for non-enum columns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -310,7 +310,7 @@ function CellEditor(props: {
   const dt = meta.data_type;
   const [val, setVal] = useState<string>(initial ?? "");
   const [isNull, setIsNull] = useState<boolean>(initial === null);
-  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -333,6 +333,39 @@ function CellEditor(props: {
       e.preventDefault();
       onCancel();
     }
+  }
+
+  // Enum: native select populated with the type's labels.
+  if (meta.enum_values && meta.enum_values.length > 0) {
+    const current = isNull ? "" : val;
+    return (
+      <div className="cell-editor enum" onKeyDown={handleKey}>
+        <select
+          ref={inputRef as React.RefObject<HTMLSelectElement>}
+          value={current}
+          className="mono"
+          onChange={(e) => { setIsNull(false); setVal(e.target.value); }}
+        >
+          {meta.is_nullable && <option value="">(null)</option>}
+          {!meta.enum_values.includes(val) && !isNull && val !== "" && (
+            <option value={val} disabled>{`${val} (invalid)`}</option>
+          )}
+          {meta.enum_values.map((v) => (
+            <option key={v} value={v}>{v}</option>
+          ))}
+        </select>
+        {meta.is_nullable && (
+          <button className="set-null" onClick={() => setIsNull(true)} title="Set NULL">∅</button>
+        )}
+        <div className="cell-editor-actions">
+          <button
+            className="ce-commit"
+            onClick={() => onCommit(isNull || current === "" ? null : current)}
+          >↵</button>
+          <button className="ce-cancel" onClick={onCancel}>esc</button>
+        </div>
+      </div>
+    );
   }
 
   // Bool: segmented control

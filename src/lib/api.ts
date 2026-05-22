@@ -21,6 +21,8 @@ export type Column = {
 export type ColumnDescription = Column & {
   default: string | null;
   is_primary_key: boolean;
+  /** Postgres enum labels in declared order; absent for non-enum columns. */
+  enum_values?: string[];
 };
 
 export type ColumnMeta = {

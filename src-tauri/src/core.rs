@@ -172,6 +172,8 @@ pub async fn describe_table(
             SELECT
                 c.column_name,
                 c.data_type,
+                c.udt_schema,
+                c.udt_name,
                 c.is_nullable = 'YES' AS is_nullable,
                 c.column_default,
                 EXISTS (
@@ -184,7 +186,14 @@ pub async fn describe_table(
                       AND k.table_schema = c.table_schema
                       AND k.table_name = c.table_name
                       AND k.column_name = c.column_name
-                ) AS is_pk
+                ) AS is_pk,
+                CASE WHEN c.data_type = 'USER-DEFINED' THEN (
+                    SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder)
+                    FROM pg_type t
+                    JOIN pg_namespace n ON n.oid = t.typnamespace
+                    JOIN pg_enum e ON e.enumtypid = t.oid
+                    WHERE n.nspname = c.udt_schema AND t.typname = c.udt_name
+                ) END AS enum_values
             FROM information_schema.columns c
             WHERE c.table_schema = $1 AND c.table_name = $2
             ORDER BY c.ordinal_position
@@ -202,6 +211,9 @@ pub async fn describe_table(
                 is_nullable: r.get("is_nullable"),
                 default: r.try_get("column_default").ok(),
                 is_primary_key: r.get("is_pk"),
+                udt_schema: r.try_get("udt_schema").ok(),
+                udt_name: r.try_get("udt_name").ok(),
+                enum_values: r.try_get::<Option<Vec<String>>, _>("enum_values").ok().flatten(),
             })
             .collect();
         Ok::<_, anyhow::Error>(out)
@@ -630,10 +642,21 @@ fn quote_ident(s: &str) -> String {
 }
 
 /// Postgres `data_type` from information_schema.columns isn't always castable
-/// directly (e.g. "character varying", "timestamp with time zone"). Map to
-/// canonical forms suitable for `::cast`.
-fn cast_type(data_type: &str) -> &str {
-    match data_type {
+/// directly (e.g. "character varying", "timestamp with time zone", or
+/// "USER-DEFINED" for enums). Map to a canonical, castable form.
+fn cast_type(col: &ColumnDescription) -> Result<String> {
+    if col.data_type == "USER-DEFINED" {
+        // Enums / domains / composites — must cast to the real schema-qualified
+        // type, not the literal "USER-DEFINED" keyword.
+        let s = col.udt_schema.as_deref().ok_or_else(|| {
+            anyhow!("column {} is USER-DEFINED but udt_schema is missing", col.name)
+        })?;
+        let n = col.udt_name.as_deref().ok_or_else(|| {
+            anyhow!("column {} is USER-DEFINED but udt_name is missing", col.name)
+        })?;
+        return Ok(format!("{}.{}", quote_ident(s), quote_ident(n)));
+    }
+    let canonical = match col.data_type.as_str() {
         "character varying" => "varchar",
         "character" => "char",
         "timestamp without time zone" => "timestamp",
@@ -644,13 +667,13 @@ fn cast_type(data_type: &str) -> &str {
         // bytea, json, jsonb, uuid, date, text, citext, integer, bigint, smallint,
         // numeric, boolean, real, etc. — already valid as a cast target.
         other => other,
-    }
+    };
+    Ok(canonical.to_string())
 }
 
-fn col_type<'a>(cols: &'a [ColumnDescription], name: &str) -> Result<&'a str> {
+fn col_desc<'a>(cols: &'a [ColumnDescription], name: &str) -> Result<&'a ColumnDescription> {
     cols.iter()
         .find(|c| c.name == name)
-        .map(|c| c.data_type.as_str())
         .ok_or_else(|| anyhow!("column not found: {name}"))
 }
 
@@ -664,6 +687,8 @@ async fn fetch_columns(
         SELECT
             c.column_name,
             c.data_type,
+            c.udt_schema,
+            c.udt_name,
             c.is_nullable = 'YES' AS is_nullable,
             c.column_default,
             EXISTS (
@@ -694,6 +719,9 @@ async fn fetch_columns(
             is_nullable: r.get("is_nullable"),
             default: r.try_get("column_default").ok(),
             is_primary_key: r.get("is_pk"),
+            udt_schema: r.try_get("udt_schema").ok(),
+            udt_name: r.try_get("udt_name").ok(),
+            enum_values: None,
         })
         .collect())
 }
@@ -720,7 +748,7 @@ fn build_update(
     sql.push_str(&quote_ident(table));
     sql.push_str(" SET ");
     for (i, (col, val)) in set.iter().enumerate() {
-        let ty = cast_type(col_type(cols, col)?);
+        let ty = cast_type(col_desc(cols, col)?)?;
         if i > 0 {
             sql.push_str(", ");
         }
@@ -731,7 +759,7 @@ fn build_update(
     }
     sql.push_str(" WHERE ");
     for (i, (col, val)) in pk.iter().enumerate() {
-        let ty = cast_type(col_type(cols, col)?);
+        let ty = cast_type(col_desc(cols, col)?)?;
         if i > 0 {
             sql.push_str(" AND ");
         }
@@ -770,7 +798,7 @@ fn build_insert(
     }
     sql.push_str(") VALUES (");
     for (i, (col, val)) in values.iter().enumerate() {
-        let ty = cast_type(col_type(cols, col)?);
+        let ty = cast_type(col_desc(cols, col)?)?;
         if i > 0 {
             sql.push_str(", ");
         }
@@ -798,7 +826,7 @@ fn build_delete(
     sql.push_str(&quote_ident(table));
     sql.push_str(" WHERE ");
     for (i, (col, val)) in pk.iter().enumerate() {
-        let ty = cast_type(col_type(cols, col)?);
+        let ty = cast_type(col_desc(cols, col)?)?;
         if i > 0 {
             sql.push_str(" AND ");
         }
