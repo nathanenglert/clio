@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Database App",
+  "productName": "Clio",
   "version": "0.0.1",
   "identifier": "com.dbapp.poc",
   "build": {
@@ -12,14 +12,16 @@
   "app": {
     "windows": [
       {
-        "title": "Database App",
+        "title": "Clio",
         "width": 1280,
         "height": 800,
         "minWidth": 800,
         "minHeight": 480,
         "decorations": true,
         "transparent": false,
-        "resizable": true
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

@@ -109,6 +109,9 @@ export function App() {
       className="shell"
       style={{ "--rail-w": `${rail.size}px` } as CSSProperties}
     >
+      <div className="titlebar" data-tauri-drag-region>
+        Clio
+      </div>
       <div className="rail">
         <ConnectionRail
           connections={connections}
