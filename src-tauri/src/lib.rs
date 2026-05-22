@@ -160,9 +160,16 @@ fn format_err(e: anyhow::Error) -> String {
 pub fn run() {
     init_tracing();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_pilot::init());
+    }
+
+    builder
         .setup(|app| {
             let handle = app.handle().clone();
             // Build Core synchronously on the async runtime, then manage it
