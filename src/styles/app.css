@@ -262,7 +262,7 @@ button, input, textarea, select {
 .tab-glyph {
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 13px;
 }
 .tab.agent .tab-glyph { color: var(--agent); }
 
@@ -291,13 +291,13 @@ button, input, textarea, select {
   background: transparent;
   border: 0;
   color: var(--text-muted);
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   border-radius: var(--r-sm);
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
-  opacity: 0.6;
+  opacity: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -337,29 +337,29 @@ button, input, textarea, select {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 22px;
-  padding: 0 10px;
+  height: 26px;
+  padding: 0 12px;
   background: var(--op-read-soft);
   color: var(--op-read);
   border: 1px solid rgba(127, 168, 134, 0.3);
   border-radius: 5px;
-  font-size: var(--fs-xs);
-  font-weight: 500;
+  font-size: var(--fs-sm);
+  font-weight: 600;
   font-family: var(--font-ui);
   cursor: pointer;
 }
 .run-chip:hover:not(:disabled) { background: rgba(127, 168, 134, 0.22); }
 .run-chip:disabled { opacity: 0.45; cursor: not-allowed; }
-.run-icon { font-size: 10px; line-height: 1; }
+.run-icon { font-size: 11px; line-height: 1; }
 
 .editor-btn {
   background: transparent;
   border: 0;
   color: var(--text-secondary);
-  padding: 4px 8px;
+  padding: 5px 10px;
   border-radius: var(--r-sm);
   cursor: pointer;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -384,10 +384,10 @@ button, input, textarea, select {
 
 .kbd {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-muted);
-  padding: 1px 4px;
-  border: 1px solid var(--line-default);
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
   border-radius: 3px;
   background: transparent;
 }
@@ -402,7 +402,7 @@ button, input, textarea, select {
   border: 1px solid var(--agent-line);
   border-radius: 5px;
   color: var(--agent);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
 }
 .agent-dot {
@@ -413,7 +413,7 @@ button, input, textarea, select {
 }
 
 .editor-meta {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-muted);
   padding-left: 4px;
 }
@@ -435,7 +435,7 @@ button, input, textarea, select {
 /* ── Result toolbar ───────────────────────────────────────────────── */
 
 .result-toolbar {
-  height: 30px;
+  height: 32px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -444,7 +444,7 @@ button, input, textarea, select {
   background: var(--bg-panel);
   border-bottom: 1px solid var(--line-soft);
   color: var(--text-secondary);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
 }
 .result-toolbar .spacer { flex: 1; }
 
@@ -452,10 +452,10 @@ button, input, textarea, select {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 20px;
+  height: 22px;
   padding: 0 8px;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
 }
 .status-pill.ok {
@@ -482,11 +482,11 @@ button, input, textarea, select {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 60%;
-  font-size: 11px;
+  font-size: 12px;
 }
 .result-empty {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* ── Results grid ─────────────────────────────────────────────────── */
@@ -533,12 +533,12 @@ button, input, textarea, select {
 }
 .th-content {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
+  flex-wrap: nowrap;
+  align-items: center;
   column-gap: 10px;
   row-gap: 0;
-  height: 14px;
-  line-height: 14px;
+  height: 22px;
+  line-height: 22px;
   overflow: hidden;
 }
 .grid-col-name {
@@ -552,9 +552,17 @@ button, input, textarea, select {
 .grid-col-type {
   flex: 0 0 auto;
   margin-left: auto;
-  color: var(--text-faint);
+  color: var(--text-secondary);
   font-size: 10px;
+  line-height: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
   white-space: nowrap;
+  text-transform: lowercase;
 }
 
 .grid tbody tr:nth-child(even) td:not(.grid-rownum) {
@@ -565,13 +573,13 @@ button, input, textarea, select {
 .grid td.grid-rownum {
   width: 44px;
   text-align: center;
-  color: var(--text-faint);
+  color: var(--text-muted);
   padding: 7px 8px;
   font-variant-numeric: tabular-nums;
   position: relative;
 }
 
-.grid td.null { color: var(--text-faint); font-style: italic; }
+.grid td.null { color: var(--text-muted); font-style: italic; }
 .grid td.json { color: var(--op-ddl); }
 
 .empty-pane {
