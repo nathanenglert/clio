@@ -219,7 +219,7 @@ export function App() {
         onRerunSql={onAgentRerun}
       />
       {hasTrayWork && trayBatch && trayTab && (
-        <>
+        <div className="tray-region">
           {commitError && (
             <div className="tray-error">
               <span className="tray-error-icon" aria-hidden>⚠</span>
@@ -240,7 +240,7 @@ export function App() {
             onCommit={doCommit}
             onDiscard={doDiscard}
           />
-        </>
+        </div>
       )}
       {showReview && trayTab && trayBatch && (
         <ReviewModal

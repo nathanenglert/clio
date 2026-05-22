@@ -1097,9 +1097,16 @@ body.dragging-y * { cursor: inherit !important; }
   color: var(--op-write);
 }
 
+/* Pending tray region (above status bar): wraps optional error banner + tray */
+.tray-region {
+  grid-area: tray;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 /* Pending tray (above status bar) */
 .pending-tray {
-  grid-area: tray;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1131,7 +1138,6 @@ body.dragging-y * { cursor: inherit !important; }
 .pending-tray .kbd { margin-left: 6px; }
 
 .tray-error {
-  grid-area: tray;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1142,9 +1148,7 @@ body.dragging-y * { cursor: inherit !important; }
   font-size: var(--fs-xs);
 }
 .tray-error-icon { font-size: 12px; }
-
-/* Pending tray + error stack: when both, error sits above the tray */
-.tray-error + .pending-tray { grid-area: unset; }
+.tray-error .spacer { flex: 1; }
 
 /* Op glyph (small SVG-free version) */
 .op-glyph {
