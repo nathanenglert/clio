@@ -79,3 +79,26 @@ When asked to implement or change a UI surface, read the relevant screenshot + t
 - Homebrew `cargo` is broken on this machine. Use `$HOME/.cargo/bin/cargo` for any Rust build.
 - In Tauri 2 main-thread/setup code, use `tauri::async_runtime::spawn` — not `tokio::spawn`.
 - The Tauri 2 webview silently suppresses `alert/confirm/prompt`. Use inline UI or `@tauri-apps/plugin-dialog`.
+
+## 7. Validate Before Done
+
+**For any change that touches runtime behavior, drive the running app via
+`tauri-pilot` before claiming the task complete.**
+
+`cargo check` and type checks prove the code compiles. They do not prove
+the feature works. Run the app, then:
+
+```
+tauri-pilot ping              # confirm connectivity
+tauri-pilot snapshot -i       # see what's actually on screen
+tauri-pilot screenshot <path> # visual confirmation
+```
+
+Drive the golden path and at least one edge case. If you cannot reach
+the code path through the UI, say so explicitly — do not claim success
+from a green build alone.
+
+Skip when changes are docs-only, gitignore, build config, or Rust-only
+refactors with no UI surface.
+
+See `.claude/skills/tauri-pilot/SKILL.md` for the full command reference.
