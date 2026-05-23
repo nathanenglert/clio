@@ -293,6 +293,7 @@ export function ResultsGrid(props: Props) {
   }
 
   const allSelected = sel.kind === "all";
+  const noRows = result.rows.length === 0 && activeAdds.length === 0;
 
   return (
     <div className="grid-wrap" ref={wrapRef} tabIndex={-1} onKeyDown={onGridKeyDown}>
@@ -546,6 +547,13 @@ export function ResultsGrid(props: Props) {
           )}
         </tbody>
       </table>
+
+      {noRows && !editable && (
+        <div className="grid-empty">
+          <span className="grid-empty-glyph" aria-hidden>∅</span>
+          <span>Query returned no rows.</span>
+        </div>
+      )}
     </div>
   );
 }

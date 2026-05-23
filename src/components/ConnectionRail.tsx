@@ -84,37 +84,32 @@ export function ConnectionRail(props: Props) {
       <ul className="rail-list">
         {props.connections.map((c) => {
           const armed = pendingDelete === c.name;
+          const isBusy = busy === c.name;
           return (
           <li key={c.id}>
-            <div style={{ display: "flex", alignItems: "stretch", gap: 2 }}>
+            <div className={`rail-item-row${armed ? " armed" : ""}`}>
               <button
                 className={`rail-item ${c.connected ? "connected" : "disconnected"} ${
                   props.activeName === c.name ? "active" : ""
                 }`}
                 onClick={() => connect(c)}
-                disabled={busy === c.name}
+                disabled={isBusy}
                 title={`${c.username}@${c.host}:${c.port}/${c.database}`}
                 style={{ flex: 1, minWidth: 0 }}
               >
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
                   {c.name}
                 </span>
+                {isBusy && (
+                  <span className="rail-item-busy mono" aria-hidden>
+                    {c.connected ? "disconnecting…" : "connecting…"}
+                  </span>
+                )}
               </button>
               <button
+                className={`rail-item-del${armed ? " armed" : ""}`}
                 onClick={(e) => armOrConfirmDelete(c, e)}
                 title={armed ? "Click again within 3s to confirm" : "Delete"}
-                style={{
-                  background: armed ? "var(--op-destruct-soft)" : "transparent",
-                  border: armed ? "1px solid var(--op-destruct)" : "1px solid transparent",
-                  color: armed ? "var(--op-destruct)" : "var(--text-muted)",
-                  borderRadius: "var(--r-sm)",
-                  padding: "0 8px",
-                  cursor: "pointer",
-                  fontSize: "var(--fs-xs)",
-                  fontFamily: armed ? "var(--font-mono)" : "inherit",
-                  fontWeight: armed ? 500 : 400,
-                  whiteSpace: "nowrap",
-                }}
               >
                 {armed ? "delete?" : "×"}
               </button>

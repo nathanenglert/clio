@@ -114,10 +114,10 @@ export function Workspace({
           <span>{running ? "Running…" : "Run"}</span>
           <kbd className="kbd">⌘↵</kbd>
         </button>
-        <button className="editor-btn" disabled title="Format SQL (coming soon)">
-          Format <kbd className="kbd">⌥⇧F</kbd>
+        <button className="editor-btn soon" disabled title="Format SQL — coming soon">
+          Format
         </button>
-        <button className="editor-btn" disabled title="EXPLAIN (coming soon)">
+        <button className="editor-btn soon" disabled title="EXPLAIN — coming soon">
           EXPLAIN
         </button>
         <div className="spacer" />
@@ -168,13 +168,17 @@ export function Workspace({
           </>
         ) : error ? (
           <span className="status-pill err mono">{error}</span>
+        ) : !active.connected ? (
+          <span className="result-empty mono">
+            Disconnected · click <span className="result-empty-em">{active.name}</span> in the rail to connect.
+          </span>
         ) : (
           <span className="result-empty mono">
             No results yet. ⌘↵ to run.
           </span>
         )}
         <div className="spacer" />
-        <button className="editor-btn" disabled>
+        <button className="editor-btn soon" disabled title="Filter — coming soon">
           <span className="editor-btn-icon" aria-hidden>⏷</span>
           Filter
         </button>
@@ -195,7 +199,13 @@ export function Workspace({
           connectionName={active.name}
           openSignal={exportOpenSignal}
         />
-        <button className="editor-btn" disabled aria-label="Refresh">↻</button>
+        <button
+          className="editor-btn"
+          disabled={running || !result || !active.connected}
+          aria-label="Re-run query"
+          title="Re-run query"
+          onClick={onRun}
+        >↻</button>
       </div>
 
       <ResultsGrid
