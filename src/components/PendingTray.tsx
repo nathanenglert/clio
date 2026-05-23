@@ -20,27 +20,9 @@ export function PendingTray({ batch, pendingAdds, table, connection, busy, onRev
   const { edits, deletes } = counts;
   return (
     <div className="pending-tray">
-      {edits > 0 && (
-        <span className="tray-seg">
-          <span className="op-glyph write" aria-hidden />
-          <span className="mono tray-count">{edits}</span>
-          <span className="tray-label">edit{edits === 1 ? "" : "s"}</span>
-        </span>
-      )}
-      {adds > 0 && (
-        <span className="tray-seg">
-          <span className="op-glyph write" aria-hidden />
-          <span className="mono tray-count">{adds}</span>
-          <span className="tray-label">add{adds === 1 ? "" : "s"}</span>
-        </span>
-      )}
-      {deletes > 0 && (
-        <span className="tray-seg">
-          <span className="op-glyph destruct" aria-hidden />
-          <span className="mono tray-count">{deletes}</span>
-          <span className="tray-label">delete{deletes === 1 ? "" : "s"}</span>
-        </span>
-      )}
+      <TraySegment count={edits} singular="edit" plural="edits" glyph="write" />
+      <TraySegment count={adds} singular="add" plural="adds" glyph="write" />
+      <TraySegment count={deletes} singular="delete" plural="deletes" glyph="destruct" />
       <span className="tray-dot">·</span>
       <span className="mono tray-context">
         {table} @ {connection}
@@ -64,5 +46,26 @@ export function PendingTray({ batch, pendingAdds, table, connection, busy, onRev
         ✗
       </button>
     </div>
+  );
+}
+
+function TraySegment({
+  count,
+  singular,
+  plural,
+  glyph,
+}: {
+  count: number;
+  singular: string;
+  plural: string;
+  glyph: "write" | "destruct";
+}) {
+  if (count === 0) return null;
+  return (
+    <span className="tray-seg">
+      <span className={`op-glyph ${glyph}`} aria-hidden />
+      <span className="mono tray-count">{count}</span>
+      <span className="tray-label">{count === 1 ? singular : plural}</span>
+    </span>
   );
 }

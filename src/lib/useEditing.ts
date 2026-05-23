@@ -140,10 +140,12 @@ export function useEditing(connectionName: string | null) {
     }));
   }, []);
 
-  const discardAll = useCallback((tabId: string) => {
+  const clearTabState = useCallback((tabId: string) => {
     setBatches((prev) => ({ ...prev, [tabId]: emptyBatch }));
     setActiveAddsMap((prev) => ({ ...prev, [tabId]: [] }));
   }, []);
+
+  const discardAll = clearTabState;
 
   const commit = useCallback(
     async (tab: EditableTab): Promise<MutationOutcome | null> => {
@@ -156,9 +158,7 @@ export function useEditing(connectionName: string | null) {
       try {
         const outcome = await api.apply_mutations(connectionName, mb);
         if (outcome.committed) {
-          // Clear both batch and active adds on success.
-          setBatches((prev) => ({ ...prev, [tab.id]: emptyBatch }));
-          setActiveAddsMap((prev) => ({ ...prev, [tab.id]: [] }));
+          clearTabState(tab.id);
         }
         return outcome;
       } catch (e) {
@@ -173,7 +173,7 @@ export function useEditing(connectionName: string | null) {
         setBusy(false);
       }
     },
-    [connectionName, batches, activeAdds],
+    [connectionName, batches, activeAdds, clearTabState],
   );
 
   // When the connection switches, clear everything (different DB context).

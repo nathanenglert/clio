@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api, type McpSnippet, type McpTarget } from "../lib/api";
+import { useCopyFeedback } from "../lib/useCopyFeedback";
+import { Modal } from "./Modal";
 
 export function McpConfigModal({ onClose }: { onClose: () => void }) {
   const [snip, setSnip] = useState<McpSnippet | null>(null);
   const [activeKey, setActiveKey] = useState<string>("claude-code");
-  const [copied, setCopied] = useState(false);
+  const { copied, markCopied } = useCopyFeedback(1500);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -30,21 +32,15 @@ export function McpConfigModal({ onClose }: { onClose: () => void }) {
     if (!active) return;
     try {
       await writeText(active.snippet);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      markCopied();
     } catch (e) {
       setError(String(e));
     }
   };
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 580 }}
-      >
-        <h2>MCP config snippet</h2>
+    <Modal onClose={onClose} style={{ width: 580 }}>
+      <h2>MCP config snippet</h2>
 
         {snip && snip.targets.length > 1 && (
           <div className="mcp-tabs" role="tablist">
@@ -54,10 +50,7 @@ export function McpConfigModal({ onClose }: { onClose: () => void }) {
                 role="tab"
                 aria-selected={t.key === activeKey}
                 className={`mcp-tab ${t.key === activeKey ? "active" : ""}`}
-                onClick={() => {
-                  setActiveKey(t.key);
-                  setCopied(false);
-                }}
+                onClick={() => setActiveKey(t.key)}
               >
                 {t.label}
               </button>
@@ -104,7 +97,6 @@ export function McpConfigModal({ onClose }: { onClose: () => void }) {
             {copied ? "Copied!" : "Copy snippet"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

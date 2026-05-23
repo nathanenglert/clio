@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../lib/api";
+import { Modal } from "./Modal";
 
 type Props = {
   onClose: () => void;
@@ -44,9 +45,8 @@ export function AddConnectionModal({ onClose, onAdded }: Props) {
   };
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Add connection</h2>
+    <Modal onClose={onClose}>
+      <h2>Add connection</h2>
         <div className="modal-row">
           <label>Name</label>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="my-staging" autoFocus />
@@ -110,7 +110,6 @@ export function AddConnectionModal({ onClose, onAdded }: Props) {
             {busy ? "Saving…" : "Save"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

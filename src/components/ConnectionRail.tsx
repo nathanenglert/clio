@@ -24,12 +24,15 @@ export function ConnectionRail(props: Props) {
     };
   }, []);
 
-  const connect = async (c: Connection) => {
-    setBusy(c.name);
+  const clearError = (name: string) =>
     setErrors((m) => {
-      const { [c.name]: _, ...rest } = m;
+      const { [name]: _, ...rest } = m;
       return rest;
     });
+
+  const connect = async (c: Connection) => {
+    setBusy(c.name);
+    clearError(c.name);
     try {
       if (c.connected) {
         await api.disconnect(c.name);
@@ -54,10 +57,7 @@ export function ConnectionRail(props: Props) {
       setPendingDelete(null);
       try {
         await api.delete_connection(c.name);
-        setErrors((m) => {
-          const { [c.name]: _, ...rest } = m;
-          return rest;
-        });
+        clearError(c.name);
         props.onChanged();
       } catch (e) {
         setErrors((m) => ({ ...m, [c.name]: String(e) }));
@@ -131,12 +131,7 @@ export function ConnectionRail(props: Props) {
                   cursor: "pointer",
                 }}
                 title="click to dismiss"
-                onClick={() =>
-                  setErrors((m) => {
-                    const { [c.name]: _, ...rest } = m;
-                    return rest;
-                  })
-                }
+                onClick={() => clearError(c.name)}
               >
                 {errors[c.name]}
               </div>

@@ -55,37 +55,10 @@ pub async fn open_metadata() -> Result<SqlitePool> {
     Ok(pool)
 }
 
-pub async fn list(pool: &SqlitePool) -> Result<Vec<Connection>> {
-    let rows = sqlx::query(
-        "SELECT id, name, host, port, database, username, ssl_mode FROM connections ORDER BY name",
-    )
-    .fetch_all(pool)
-    .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        out.push(Connection {
-            id: r.get("id"),
-            name: r.get("name"),
-            host: r.get("host"),
-            port: r.get::<i32, _>("port"),
-            database: r.get("database"),
-            username: r.get("username"),
-            ssl_mode: r.get("ssl_mode"),
-            connected: false,
-        });
-    }
-    Ok(out)
-}
+const CONNECTION_COLUMNS: &str = "id, name, host, port, database, username, ssl_mode";
 
-pub async fn get(pool: &SqlitePool, name: &str) -> Result<Connection> {
-    let r = sqlx::query(
-        "SELECT id, name, host, port, database, username, ssl_mode FROM connections WHERE name = ?1",
-    )
-    .bind(name)
-    .fetch_optional(pool)
-    .await?
-    .with_context(|| format!("no connection named {name}"))?;
-    Ok(Connection {
+fn row_to_connection(r: &sqlx::sqlite::SqliteRow) -> Connection {
+    Connection {
         id: r.get("id"),
         name: r.get("name"),
         host: r.get("host"),
@@ -94,7 +67,27 @@ pub async fn get(pool: &SqlitePool, name: &str) -> Result<Connection> {
         username: r.get("username"),
         ssl_mode: r.get("ssl_mode"),
         connected: false,
-    })
+    }
+}
+
+pub async fn list(pool: &SqlitePool) -> Result<Vec<Connection>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {CONNECTION_COLUMNS} FROM connections ORDER BY name"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_connection).collect())
+}
+
+pub async fn get(pool: &SqlitePool, name: &str) -> Result<Connection> {
+    let r = sqlx::query(&format!(
+        "SELECT {CONNECTION_COLUMNS} FROM connections WHERE name = ?1"
+    ))
+    .bind(name)
+    .fetch_optional(pool)
+    .await?
+    .with_context(|| format!("no connection named {name}"))?;
+    Ok(row_to_connection(&r))
 }
 
 pub async fn insert(pool: &SqlitePool, input: &NewConnectionInput) -> Result<Connection> {

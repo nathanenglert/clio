@@ -7,6 +7,21 @@ import {
   getEdit,
   isDeleted,
 } from "../lib/editing";
+import { makeComparator } from "../lib/gridUtils";
+import {
+  type Selection,
+  NONE,
+  buildSelectionTsv,
+  cellBoxShadow,
+  cellEdges,
+  clickCell as computeCellClick,
+  clickColumnHeader,
+  clickRowNumber,
+  isCellHighlighted,
+  isColSelected,
+  isRowSelected,
+} from "../lib/gridSelection";
+import { CellEditor } from "./CellEditor";
 
 type Props = {
   result: QueryResult | null;
@@ -34,19 +49,6 @@ type EditingCell =
   | { kind: "add"; tempId: string; col: string };
 
 type SortState = { col: string; dir: "asc" | "desc" };
-
-// Selection model. Modes are mutually exclusive — clicking switches mode.
-// Row indices in "rows" are original (origIdx) so they survive sort changes.
-// Cells store DISPLAY indices; we clear cells-mode when the sort changes
-// since the rectangle would otherwise scatter.
-type Selection =
-  | { kind: "none" }
-  | { kind: "all" }
-  | { kind: "rows"; rows: Set<number>; anchor: number }
-  | { kind: "cols"; cols: Set<string>; anchor: string }
-  | { kind: "cells"; r0: number; c0: number; r1: number; c1: number };
-
-const NONE: Selection = { kind: "none" };
 
 // Sentinel column id for the row-number column. Sorting by this column is
 // equivalent to ordering by original row index — useful as an explicit "back
@@ -132,140 +134,11 @@ export function ResultsGrid(props: Props) {
     });
   }, [result, sort, colTypeByName]);
 
-  // ── Selection predicates ────────────────────────────────────
-  function isRowSelected(origIdx: number): boolean {
-    if (sel.kind === "all") return true;
-    if (sel.kind === "rows") return sel.rows.has(origIdx);
-    return false;
-  }
-  function isColSelected(name: string): boolean {
-    if (sel.kind === "all") return true;
-    if (sel.kind === "cols") return sel.cols.has(name);
-    return false;
-  }
-  function cellRect(s: Extract<Selection, { kind: "cells" }>) {
-    return {
-      minR: Math.min(s.r0, s.r1),
-      maxR: Math.max(s.r0, s.r1),
-      minC: Math.min(s.c0, s.c1),
-      maxC: Math.max(s.c0, s.c1),
-    };
-  }
-  function isCellHighlighted(displayRow: number, colIdx: number, origIdx: number, colName: string): boolean {
-    if (sel.kind === "all") return true;
-    if (sel.kind === "rows") return sel.rows.has(origIdx);
-    if (sel.kind === "cols") return sel.cols.has(colName);
-    if (sel.kind === "cells") {
-      const { minR, maxR, minC, maxC } = cellRect(sel);
-      return displayRow >= minR && displayRow <= maxR && colIdx >= minC && colIdx <= maxC;
-    }
-    return false;
-  }
-  /**
-   * For a cell at (displayRow, colIdx), return which of its four sides sit on
-   * the *outer perimeter* of the current selection — or null if the cell isn't
-   * in the selection. We render those sides as 2px green box-shadow insets, so
-   * single-cell, row, column, and rectangular selections all share one outline
-   * style. Pass colIdx = -1 for the row-number gutter (which only participates
-   * in row / all selection).
-   */
-  function cellEdges(
-    displayRow: number,
-    colIdx: number,
-    origIdx: number,
-    colName: string | null,
-  ): { top: boolean; bottom: boolean; left: boolean; right: boolean } | null {
-    if (!result) return null;
-    const colCount = result.columns.length;
-    const rowCount = displayRows.length;
-    const isGutter = colIdx === -1;
-
-    if (sel.kind === "all") {
-      return {
-        top: displayRow === 0,
-        bottom: displayRow === rowCount - 1,
-        left: isGutter,
-        right: !isGutter && colIdx === colCount - 1,
-      };
-    }
-    if (sel.kind === "rows") {
-      if (!sel.rows.has(origIdx)) return null;
-      const aboveOrig = displayRow > 0 ? displayRows[displayRow - 1].origIdx : -1;
-      const belowOrig = displayRow < rowCount - 1 ? displayRows[displayRow + 1].origIdx : -1;
-      return {
-        top: !sel.rows.has(aboveOrig),
-        bottom: !sel.rows.has(belowOrig),
-        left: isGutter,
-        right: !isGutter && colIdx === colCount - 1,
-      };
-    }
-    if (sel.kind === "cols") {
-      if (isGutter || !colName || !sel.cols.has(colName)) return null;
-      const leftCol = colIdx > 0 ? result.columns[colIdx - 1].name : "";
-      const rightCol = colIdx < colCount - 1 ? result.columns[colIdx + 1].name : "";
-      return {
-        top: displayRow === 0,
-        bottom: displayRow === rowCount - 1,
-        left: !sel.cols.has(leftCol),
-        right: !sel.cols.has(rightCol),
-      };
-    }
-    if (sel.kind === "cells") {
-      if (isGutter) return null;
-      const { minR, maxR, minC, maxC } = cellRect(sel);
-      if (displayRow < minR || displayRow > maxR || colIdx < minC || colIdx > maxC) return null;
-      return {
-        top: displayRow === minR,
-        bottom: displayRow === maxR,
-        left: colIdx === minC,
-        right: colIdx === maxC,
-      };
-    }
-    return null;
-  }
-
-  // Build the composite box-shadow for a cell: selection perimeter + dirty
-  // marker. Done inline because CSS box-shadow doesn't compose across classes,
-  // and a dirty cell's left-bar needs to coexist with selection edges.
-  function cellBoxShadow(
-    edges: { top: boolean; bottom: boolean; left: boolean; right: boolean } | null,
-    dirty: boolean,
-  ): string | undefined {
-    const parts: string[] = [];
-    if (edges?.top) parts.push("inset 0 2px 0 var(--op-read)");
-    if (edges?.bottom) parts.push("inset 0 -2px 0 var(--op-read)");
-    if (edges?.left) parts.push("inset 2px 0 0 var(--op-read)");
-    if (edges?.right) parts.push("inset -2px 0 0 var(--op-read)");
-    // Dirty marker (gold left bar) — selection's own left edge would cover it,
-    // so skip in that case.
-    if (dirty && !edges?.left) parts.push("inset 2px 0 0 0 var(--op-write)");
-    return parts.length ? parts.join(", ") : undefined;
-  }
-
   // ── Click handlers ──────────────────────────────────────────
   function clickRowNum(origIdx: number, e: React.MouseEvent) {
     e.preventDefault();
     focusGrid();
-    if (e.shiftKey && sel.kind === "rows") {
-      const lo = Math.min(sel.anchor, origIdx);
-      const hi = Math.max(sel.anchor, origIdx);
-      const rows = new Set<number>();
-      for (let i = lo; i <= hi; i++) rows.add(i);
-      setSel({ kind: "rows", rows, anchor: sel.anchor });
-      return;
-    }
-    if ((e.metaKey || e.ctrlKey) && sel.kind === "rows") {
-      const rows = new Set(sel.rows);
-      if (rows.has(origIdx)) rows.delete(origIdx);
-      else rows.add(origIdx);
-      if (rows.size === 0) {
-        setSel(NONE);
-        return;
-      }
-      setSel({ kind: "rows", rows, anchor: origIdx });
-      return;
-    }
-    setSel({ kind: "rows", rows: new Set([origIdx]), anchor: origIdx });
+    setSel((prev) => clickRowNumber(prev, origIdx, e));
   }
 
   function clickColHeader(colName: string, e: React.MouseEvent) {
@@ -273,73 +146,18 @@ export function ResultsGrid(props: Props) {
     focusGrid();
     if (!result) return;
     const order = result.columns.map((c) => c.name);
-    if (e.shiftKey && sel.kind === "cols") {
-      const a = order.indexOf(sel.anchor);
-      const b = order.indexOf(colName);
-      if (a >= 0 && b >= 0) {
-        const lo = Math.min(a, b), hi = Math.max(a, b);
-        const cols = new Set<string>();
-        for (let i = lo; i <= hi; i++) cols.add(order[i]);
-        setSel({ kind: "cols", cols, anchor: sel.anchor });
-        return;
-      }
-    }
-    if ((e.metaKey || e.ctrlKey) && sel.kind === "cols") {
-      const cols = new Set(sel.cols);
-      if (cols.has(colName)) cols.delete(colName);
-      else cols.add(colName);
-      if (cols.size === 0) {
-        setSel(NONE);
-        return;
-      }
-      setSel({ kind: "cols", cols, anchor: colName });
-      return;
-    }
-    setSel({ kind: "cols", cols: new Set([colName]), anchor: colName });
+    setSel((prev) => clickColumnHeader(prev, colName, e, order));
   }
 
   function clickCell(displayRow: number, colIdx: number, e: React.MouseEvent) {
     focusGrid();
-    if (e.shiftKey && sel.kind === "cells") {
-      setSel({ ...sel, r1: displayRow, c1: colIdx });
-      return;
-    }
-    setSel({ kind: "cells", r0: displayRow, c0: colIdx, r1: displayRow, c1: colIdx });
+    setSel((prev) => computeCellClick(prev, displayRow, colIdx, e));
   }
 
   function clickCorner(e: React.MouseEvent) {
     e.preventDefault();
     focusGrid();
     setSel({ kind: "all" });
-  }
-
-  // ── Copy / delete helpers ───────────────────────────────────
-  function buildSelectionTsv(): string {
-    if (!result) return "";
-    let lines: string[] = [];
-    if (sel.kind === "all") {
-      lines = displayRows.map(({ row }) => row.map(cellToTsv).join("\t"));
-    } else if (sel.kind === "rows") {
-      lines = displayRows
-        .filter(({ origIdx }) => sel.rows.has(origIdx))
-        .map(({ row }) => row.map(cellToTsv).join("\t"));
-    } else if (sel.kind === "cols") {
-      const idxs: number[] = [];
-      result.columns.forEach((c, i) => {
-        if (sel.cols.has(c.name)) idxs.push(i);
-      });
-      lines = displayRows.map(({ row }) => idxs.map((i) => cellToTsv(row[i])).join("\t"));
-    } else if (sel.kind === "cells") {
-      const { minR, maxR, minC, maxC } = cellRect(sel);
-      for (let r = minR; r <= maxR; r++) {
-        const dr = displayRows[r];
-        if (!dr) continue;
-        const cells: string[] = [];
-        for (let c = minC; c <= maxC; c++) cells.push(cellToTsv(dr.row[c]));
-        lines.push(cells.join("\t"));
-      }
-    }
-    return lines.join("\n");
   }
 
   // Copy plumbing. We bind two listeners at document level so they fire before
@@ -354,7 +172,7 @@ export function ResultsGrid(props: Props) {
   // Both paths idempotently write the same TSV; whichever fires first wins,
   // and if both fire the second call is a harmless overwrite.
   const copyRef = useRef<() => string>(() => "");
-  copyRef.current = buildSelectionTsv;
+  copyRef.current = () => (result ? buildSelectionTsv(sel, result, displayRows) : "");
   const selKindRef = useRef(sel.kind);
   selKindRef.current = sel.kind;
   useEffect(() => {
@@ -516,7 +334,7 @@ export function ResultsGrid(props: Props) {
               const notNullMissing =
                 editable && meta && !meta.is_nullable && !meta.default;
               const active = sort?.col === c.name;
-              const colSel = isColSelected(c.name);
+              const colSel = isColSelected(sel, c.name);
               const ariaSort: "ascending" | "descending" | "none" = active
                 ? sort!.dir === "asc"
                   ? "ascending"
@@ -555,7 +373,7 @@ export function ResultsGrid(props: Props) {
         <tbody>
           {displayRows.map(({ row, origIdx: ri }, displayRow) => {
             const deleted = isDeleted(batch, ri);
-            const rowSel = isRowSelected(ri);
+            const rowSel = isRowSelected(sel, ri);
             return (
               <tr
                 key={ri}
@@ -569,7 +387,10 @@ export function ResultsGrid(props: Props) {
                 <td
                   className="grid-rownum"
                   style={(() => {
-                    const shadow = cellBoxShadow(cellEdges(displayRow, -1, ri, null), false);
+                    const shadow = cellBoxShadow(
+                      cellEdges(sel, displayRow, -1, ri, null, result, displayRows),
+                      false,
+                    );
                     return shadow ? { boxShadow: shadow } : undefined;
                   })()}
                   onClick={deleted ? undefined : (e) => clickRowNum(ri, e)}
@@ -598,8 +419,8 @@ export function ResultsGrid(props: Props) {
                   const dirty = editState.staged;
                   const isJson = col.data_type === "jsonb" || col.data_type === "json";
                   const isNull = displayValue === null;
-                  const highlighted = isCellHighlighted(displayRow, ci, ri, col.name);
-                  const edges = cellEdges(displayRow, ci, ri, col.name);
+                  const highlighted = isCellHighlighted(sel, displayRow, ci, ri, col.name);
+                  const edges = cellEdges(sel, displayRow, ci, ri, col.name, result, displayRows);
                   const boxShadow = cellBoxShadow(edges, dirty);
                   const cls = [
                     isNull ? "null" : "",
@@ -759,210 +580,6 @@ function SortRail(props: {
       <span className={`sort-chev down${active && dir === "desc" ? " on" : ""}`} aria-hidden>▾</span>
     </button>
   );
-}
-
-// ── Inline cell editor (type-aware) ──────────────────────────────
-
-function CellEditor(props: {
-  meta: ColumnDescription;
-  initial: string | null;
-  schema: string;
-  table: string;
-  onCommit: (value: string | null) => void;
-  onCancel: () => void;
-}) {
-  const { meta, initial, onCommit, onCancel } = props;
-  const dt = meta.data_type;
-  const [val, setVal] = useState<string>(initial ?? "");
-  const [isNull, setIsNull] = useState<boolean>(initial === null);
-  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-    if (inputRef.current && "select" in inputRef.current) {
-      try {
-        inputRef.current.select();
-      } catch {}
-    }
-  }, []);
-
-  function commit() {
-    onCommit(isNull ? null : val);
-  }
-
-  function handleKey(e: React.KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      commit();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      onCancel();
-    }
-  }
-
-  // Enum: native select populated with the type's labels.
-  if (meta.enum_values && meta.enum_values.length > 0) {
-    const current = isNull ? "" : val;
-    return (
-      <div className="cell-editor enum" onKeyDown={handleKey}>
-        <select
-          ref={inputRef as React.RefObject<HTMLSelectElement>}
-          value={current}
-          className="mono"
-          onChange={(e) => { setIsNull(false); setVal(e.target.value); }}
-        >
-          {meta.is_nullable && <option value="">(null)</option>}
-          {!meta.enum_values.includes(val) && !isNull && val !== "" && (
-            <option value={val} disabled>{`${val} (invalid)`}</option>
-          )}
-          {meta.enum_values.map((v) => (
-            <option key={v} value={v}>{v}</option>
-          ))}
-        </select>
-        {meta.is_nullable && (
-          <button className="set-null" onClick={() => setIsNull(true)} title="Set NULL">∅</button>
-        )}
-        <div className="cell-editor-actions">
-          <button
-            className="ce-commit"
-            onClick={() => onCommit(isNull || current === "" ? null : current)}
-          >↵</button>
-          <button className="ce-cancel" onClick={onCancel}>esc</button>
-        </div>
-      </div>
-    );
-  }
-
-  // Bool: segmented control
-  if (dt === "boolean") {
-    const current = isNull ? "null" : val === "true" ? "true" : val === "false" ? "false" : "";
-    return (
-      <div className="cell-editor bool" onKeyDown={handleKey}>
-        <div className="bool-seg" role="group">
-          <button className={current === "true" ? "on" : ""} onClick={() => { setIsNull(false); setVal("true"); }}>true</button>
-          <button className={current === "false" ? "on" : ""} onClick={() => { setIsNull(false); setVal("false"); }}>false</button>
-          <button className={current === "null" ? "on" : ""} onClick={() => setIsNull(true)}>null</button>
-        </div>
-        <div className="cell-editor-actions">
-          <button className="ce-commit" onClick={commit}>↵</button>
-          <button className="ce-cancel" onClick={onCancel}>esc</button>
-        </div>
-      </div>
-    );
-  }
-
-  // Date/timestamp: native date input
-  const isDate = dt === "date" || dt === "timestamp" || dt === "timestamp without time zone";
-  const isTimestamptz = dt === "timestamp with time zone" || dt === "timestamptz";
-  if (isDate || isTimestamptz) {
-    const inputType = dt === "date" ? "date" : "datetime-local";
-    // Normalize the initial value to the input's format.
-    const dateVal = isNull ? "" : normalizeForDateInput(val, inputType);
-    return (
-      <div className="cell-editor date" onKeyDown={handleKey}>
-        <input
-          ref={inputRef as React.RefObject<HTMLInputElement>}
-          type={inputType}
-          value={dateVal}
-          className="mono"
-          onChange={(e) => { setIsNull(false); setVal(e.target.value); }}
-        />
-        <button className="set-null" onClick={() => setIsNull(true)} title="Set NULL">∅</button>
-        <div className="cell-editor-actions">
-          <button className="ce-commit" onClick={commit}>↵</button>
-          <button className="ce-cancel" onClick={onCancel}>esc</button>
-        </div>
-      </div>
-    );
-  }
-
-  // Long-text expander: use textarea when the value is multi-line or long.
-  const long = (initial?.length ?? 0) > 80 || (initial?.includes("\n") ?? false);
-  if (long) {
-    return (
-      <div className="cell-editor long" onKeyDown={handleKey}>
-        <textarea
-          ref={inputRef as React.RefObject<HTMLTextAreaElement>}
-          value={isNull ? "" : val}
-          className="mono"
-          rows={4}
-          onChange={(e) => { setIsNull(false); setVal(e.target.value); }}
-        />
-        <button className="set-null" onClick={() => setIsNull(true)} title="Set NULL">∅</button>
-        <div className="cell-editor-actions">
-          <button className="ce-commit" onClick={commit}>⏎</button>
-          <button className="ce-cancel" onClick={onCancel}>esc</button>
-        </div>
-        <div className="cell-editor-hint mono">⇧↵ newline · ↵ commit · esc cancel</div>
-      </div>
-    );
-  }
-
-  // Default: plain mono input.
-  return (
-    <div className="cell-editor" onKeyDown={handleKey}>
-      <input
-        ref={inputRef as React.RefObject<HTMLInputElement>}
-        type="text"
-        value={isNull ? "" : val}
-        placeholder={isNull ? "null" : undefined}
-        className="mono"
-        onChange={(e) => { setIsNull(false); setVal(e.target.value); }}
-      />
-      <button className="set-null" onClick={() => setIsNull(true)} title="Set NULL">∅</button>
-      <div className="cell-editor-actions">
-        <button className="ce-commit" onClick={commit}>↵</button>
-        <button className="ce-cancel" onClick={onCancel}>esc</button>
-      </div>
-    </div>
-  );
-}
-
-function makeComparator(dataType: string): (a: string, b: string) => number {
-  const t = dataType.toLowerCase();
-  const numeric =
-    /^(small|big)?int|^int\d?|^numeric|^decimal|^real|^double|^float|^serial/.test(t);
-  const date = t.startsWith("date") || t.startsWith("timestamp") || t.startsWith("time");
-  if (numeric) {
-    return (a, b) => {
-      const na = Number(a);
-      const nb = Number(b);
-      if (Number.isNaN(na) || Number.isNaN(nb)) return a.localeCompare(b);
-      return na - nb;
-    };
-  }
-  if (date) {
-    return (a, b) => {
-      const da = Date.parse(a);
-      const db = Date.parse(b);
-      if (Number.isNaN(da) || Number.isNaN(db)) return a.localeCompare(b);
-      return da - db;
-    };
-  }
-  return (a, b) => a.localeCompare(b, undefined, { numeric: true });
-}
-
-function normalizeForDateInput(s: string, inputType: "date" | "datetime-local"): string {
-  if (!s) return "";
-  // datetime-local wants "YYYY-MM-DDTHH:MM" (no seconds, no Z).
-  if (inputType === "datetime-local") {
-    // Try to parse and reformat. Tolerant of "YYYY-MM-DD HH:MM:SS" / ISO.
-    const m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
-    if (m) return `${m[1]}T${m[2]}`;
-    return s;
-  }
-  // date: keep just the date portion if a longer string was passed.
-  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  return m ? m[1] : s;
-}
-
-// Excel/Numbers-compatible TSV encoding: cells with tabs, newlines, or
-// quotes get wrapped in double quotes with internal quotes doubled. NULL
-// becomes an empty cell.
-function cellToTsv(v: string | null): string {
-  if (v === null) return "";
-  if (/[\t\n\r"]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-  return v;
 }
 
 // ── Read-only banner ──────────────────────────────────────────────

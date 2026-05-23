@@ -74,6 +74,20 @@ export function App() {
     [events],
   );
 
+  const runTabQuery = useCallback(
+    async (tabId: string, sql: string) => {
+      if (!activeName) return;
+      tabs.updateTab(tabId, { running: true, error: null });
+      try {
+        const result = await api.run_query(activeName, sql);
+        tabs.updateTab(tabId, { result, running: false, dirty: false });
+      } catch (e) {
+        tabs.updateTab(tabId, { error: String(e), running: false, result: null });
+      }
+    },
+    [tabs, activeName],
+  );
+
   const runActive = useCallback(async () => {
     const tab = tabs.activeTab;
     if (!tab || !activeName) return;
@@ -81,14 +95,8 @@ export function App() {
       tabs.updateTab(tab.id, { error: "Not connected. Click a connection in the rail.", result: null });
       return;
     }
-    tabs.updateTab(tab.id, { running: true, error: null });
-    try {
-      const result = await api.run_query(activeName, tab.sql);
-      tabs.updateTab(tab.id, { result, running: false, dirty: false });
-    } catch (e) {
-      tabs.updateTab(tab.id, { error: String(e), running: false, result: null });
-    }
-  }, [tabs, activeName, active?.connected]);
+    await runTabQuery(tab.id, tab.sql);
+  }, [tabs, activeName, active?.connected, runTabQuery]);
 
   // ── Commit pending changes ─────────────────────────────────────
   const trayTab = tabs.activeTab;
@@ -153,15 +161,8 @@ export function App() {
 
   const onAgentRerun = async (sql: string) => {
     const id = tabs.addAgentTab(sql);
-    if (!id || !activeName || !active?.connected) return;
-    // The new tab is now active; run it directly.
-    tabs.updateTab(id, { running: true, error: null });
-    try {
-      const result = await api.run_query(activeName, sql);
-      tabs.updateTab(id, { result, running: false, dirty: false });
-    } catch (e) {
-      tabs.updateTab(id, { error: String(e), running: false, result: null });
-    }
+    if (!id || !active?.connected) return;
+    await runTabQuery(id, sql);
   };
 
   return (

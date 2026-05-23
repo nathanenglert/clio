@@ -1,6 +1,6 @@
-import { useEffect } from "react";
 import type { ActiveAdd, PendingBatch } from "../lib/editing";
 import { previewStatements } from "../lib/editing";
+import { Modal } from "./Modal";
 
 type Props = {
   batch: PendingBatch;
@@ -17,25 +17,13 @@ export function ReviewModal({ batch, activeAdds, schema, table, connection, busy
   const stmts = previewStatements(batch, schema, table, activeAdds);
   const hasDestruct = stmts.some((s) => s.kind === "delete");
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   function copy() {
     const text = ["BEGIN;", "", ...stmts.map((s) => s.sql), "", "COMMIT;"].join("\n");
     navigator.clipboard.writeText(text).catch(() => {});
   }
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="review-modal" onClick={(e) => e.stopPropagation()}>
+    <Modal onClose={onClose} className="review-modal">
         <div className="review-head">
           <span className="review-title">Review</span>
           <span className="tray-dot">·</span>
@@ -79,8 +67,7 @@ export function ReviewModal({ batch, activeAdds, schema, table, connection, busy
             {busy ? "Committing…" : "Commit"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
