@@ -12,8 +12,8 @@ use core::Core;
 use pool::PoolRegistry;
 use rmcp::{transport::stdio, ServiceExt};
 use tauri::{
-    menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu},
-    Manager, Runtime, State,
+    menu::{AboutMetadata, CheckMenuItem, Menu, PredefinedMenuItem, Submenu},
+    Emitter, Manager, Runtime, State,
 };
 use types::*;
 
@@ -153,6 +153,19 @@ async fn update_classification(
         .map_err(format_err)
 }
 
+/// Debug-only IPC: emit `reveal-sensitive` with the given boolean. Lets the
+/// dev test harness drive the toggle without touching the native menu. Also
+/// updates the menu item's checkmark so it stays in sync.
+#[cfg(debug_assertions)]
+#[tauri::command]
+fn dev_toggle_reveal<R: Runtime>(app: tauri::AppHandle<R>, on: bool) -> Result<(), String> {
+    if let Some(check) = find_check_item(&app, REVEAL_MENU_ID) {
+        check.set_checked(on).map_err(|e| e.to_string())?;
+    }
+    app.emit(REVEAL_EVENT_NAME, on).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn mcp_snippet() -> Result<McpSnippet, String> {
     let path = std::env::current_exe()
@@ -217,6 +230,47 @@ fn format_err(e: anyhow::Error) -> String {
     format!("{:#}", e)
 }
 
+/// Menu item id for the View > Reveal sensitive data toggle. Shared between
+/// the builder and the on_menu_event handler.
+const REVEAL_MENU_ID: &str = "view.reveal_sensitive";
+
+/// Tauri event name fired when the toggle state changes. Payload is the new
+/// `bool` value (true = revealing). The frontend listens to this to update
+/// global state and pass `reveal` into subsequent `run_query` calls.
+const REVEAL_EVENT_NAME: &str = "reveal-sensitive";
+
+/// Recursively search the app's menu tree for a CheckMenuItem with `id`.
+/// `Menu::get` only checks the top level; submenus need a manual walk.
+fn find_check_item<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    id: &str,
+) -> Option<tauri::menu::CheckMenuItem<R>> {
+    use tauri::menu::MenuItemKind;
+    fn walk<R: Runtime>(
+        kinds: Vec<MenuItemKind<R>>,
+        id: &str,
+    ) -> Option<tauri::menu::CheckMenuItem<R>> {
+        for k in kinds {
+            if k.id().as_ref() == id {
+                if let Some(c) = k.as_check_menuitem() {
+                    return Some(c.clone());
+                }
+            }
+            if let MenuItemKind::Submenu(sub) = &k {
+                if let Ok(children) = sub.items() {
+                    if let Some(found) = walk(children, id) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+    let menu = app.menu()?;
+    let items = menu.items().ok()?;
+    walk(items, id)
+}
+
 /// Mirrors `tauri::menu::Menu::default()` but omits the Edit menu's
 /// Undo/Redo items. Why: CodeMirror's paste handler calls preventDefault,
 /// so WebKit's native undo manager has no record of the change. The macOS
@@ -270,11 +324,30 @@ fn build_app_menu<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R
         ],
     )?;
 
+    // CheckMenuItem for redaction reveal toggle. Default OFF (mask) every
+    // launch — see design/redaction.md §"The mask toggle". The accelerator
+    // is ⌘⌥R (Cmd+Alt+R) — ⌘⇧R from the spec collides with WebKit's
+    // hard-reload binding in dev mode and would reload the page instead of
+    // toggling. Frontend listens for the `reveal-sensitive` event the menu
+    // handler emits.
+    let reveal_item = CheckMenuItem::with_id(
+        app,
+        REVEAL_MENU_ID,
+        "Reveal sensitive data",
+        true,
+        false,
+        Some("CmdOrCtrl+Alt+R"),
+    )?;
+
     let view_menu = Submenu::with_items(
         app,
         "View",
         true,
-        &[&PredefinedMenuItem::fullscreen(app, None)?],
+        &[
+            &PredefinedMenuItem::fullscreen(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &reveal_item,
+        ],
     )?;
 
     let window_menu = Submenu::with_items(
@@ -311,6 +384,18 @@ pub fn run() {
     }
 
     builder
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == REVEAL_MENU_ID {
+                // `Menu::get` only searches the top-level; our item lives
+                // under View. Walk submenus to find it. Native menus
+                // auto-toggle their visual checkmark BEFORE the event fires,
+                // so `is_checked` reports the *new* state we want to emit.
+                if let Some(check) = find_check_item(app, REVEAL_MENU_ID) {
+                    let new_state = check.is_checked().unwrap_or(false);
+                    let _ = app.emit(REVEAL_EVENT_NAME, new_state);
+                }
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             // Install the custom menu (no Undo/Redo) so ⌘Z is not bound at
@@ -354,6 +439,8 @@ pub fn run() {
             classify_schema,
             list_classifications,
             update_classification,
+            #[cfg(debug_assertions)]
+            dev_toggle_reveal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

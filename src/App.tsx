@@ -13,6 +13,7 @@ import { ToastHost, showToast } from "./components/Toast";
 import { useResizable } from "./lib/useResizable";
 import { useTabs } from "./lib/useTabs";
 import { useEditing } from "./lib/useEditing";
+import { useReveal } from "./lib/useReveal";
 import { isEmpty as batchIsEmpty } from "./lib/editing";
 
 export function App() {
@@ -55,6 +56,7 @@ export function App() {
   }, []);
 
   const active = connections.find((c) => c.name === activeName) ?? null;
+  const reveal = useReveal();
   const tabs = useTabs(activeName);
   const editing = useEditing(activeName);
   const [showReview, setShowReview] = useState(false);
@@ -79,13 +81,13 @@ export function App() {
       if (!activeName) return;
       tabs.updateTab(tabId, { running: true, error: null });
       try {
-        const result = await api.run_query(activeName, sql);
+        const result = await api.run_query(activeName, sql, reveal);
         tabs.updateTab(tabId, { result, running: false, dirty: false });
       } catch (e) {
         tabs.updateTab(tabId, { error: String(e), running: false, result: null });
       }
     },
-    [tabs, activeName],
+    [tabs, activeName, reveal],
   );
 
   const runActive = useCallback(async () => {
@@ -97,6 +99,17 @@ export function App() {
     }
     await runTabQuery(tab.id, tab.sql);
   }, [tabs, activeName, active?.connected, runTabQuery]);
+
+  // When the reveal toggle flips, re-run the active tab's last query so the
+  // user immediately sees real or fake values per the new state. Background
+  // tabs stay stale until the user switches to them — predictable, and avoids
+  // a stampede of queries on toggle.
+  useEffect(() => {
+    const tab = tabs.activeTab;
+    if (!tab || !active?.connected || !tab.result) return;
+    void runTabQuery(tab.id, tab.sql);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal]);
 
   // ── Commit pending changes ─────────────────────────────────────
   const trayTab = tabs.activeTab;
@@ -200,6 +213,15 @@ export function App() {
         />
       </div>
       <div className="work">
+        {reveal && (
+          <div className="reveal-banner" role="status">
+            <span aria-hidden className="reveal-banner-glyph">⚠</span>
+            <span>
+              Showing real values where classified columns are present. <span style={{ color: "var(--text-muted)" }}>MCP responses remain redacted.</span>
+            </span>
+            <span className="reveal-banner-hint mono">⌘⌥R to hide</span>
+          </div>
+        )}
         <Workspace
           active={active}
           tabs={tabs.tabs}
@@ -211,6 +233,7 @@ export function App() {
           onRun={runActive}
           onOpenMcpModal={() => setShowMcp(true)}
           editing={editing}
+          reveal={reveal}
         />
       </div>
       <AgentSurface
@@ -255,10 +278,19 @@ export function App() {
           onCommit={doCommit}
         />
       )}
-      <div className="status">
+      <div className={`status ${reveal ? "status--revealing" : ""}`}>
         <span>{connections.length} connection{connections.length === 1 ? "" : "s"}</span>
         <span>·</span>
         <span>{active ? (active.connected ? "connected" : "disconnected") : "no active connection"}</span>
+        {reveal && (
+          <>
+            <span>·</span>
+            <span className="status-reveal-chip" title="View > Reveal sensitive data is ON. MCP responses are still redacted.">
+              <span aria-hidden style={{ color: "var(--op-destruct)" }}>◌</span>
+              revealing
+            </span>
+          </>
+        )}
         <span style={{ marginLeft: "auto", color: "var(--text-faint)" }}>
           POC v0.0
         </span>

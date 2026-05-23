@@ -49,6 +49,14 @@
   --op-ddl:         #b591c4;   /* ALTER, CREATE schema changes */
   --op-ddl-soft:    rgba(181, 145, 196, 0.14);
 
+  /* ── Privacy / redaction (PHI / PCI / PII) ────────────────────── */
+  /* Cool muted slate-blue — distinct from all op colors and the agent
+     copper. Reads as "infrastructural" rather than alarming. Pair with
+     the dotted-circle glyph (◌) per design/redaction.md. */
+  --privacy:        #7a93a6;
+  --privacy-soft:   rgba(122, 147, 166, 0.14);
+  --privacy-line:   rgba(122, 147, 166, 0.32);
+
   /* ── Status ──────────────────────────────────────────────────── */
   --status-ok:      #7fa886;
   --status-pending: #d4a155;

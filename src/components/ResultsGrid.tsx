@@ -341,6 +341,9 @@ export function ResultsGrid(props: Props) {
                   ? "ascending"
                   : "descending"
                 : "none";
+              const privacyTitle = c.redacted
+                ? `Redacted (${(c.category ?? "").toUpperCase()}) · same real value → same fake. Toggle View > Reveal sensitive data to see real values.`
+                : undefined;
               return (
                 <th
                   key={c.name}
@@ -348,14 +351,23 @@ export function ResultsGrid(props: Props) {
                     "col-header",
                     active ? `sorted ${sort!.dir}` : "",
                     colSel ? "col-selected" : "",
+                    c.redacted ? "col-redacted" : "",
                   ]
                     .filter(Boolean)
                     .join(" ")}
                   aria-sort={ariaSort}
                   onClick={(e) => clickColHeader(c.name, e)}
-                  title="Click to select column · arrow rail to sort"
+                  title={privacyTitle ?? "Click to select column · arrow rail to sort"}
                 >
                   <div className="th-content">
+                    {c.redacted && (
+                      <span
+                        className="col-privacy-glyph"
+                        aria-label={`redacted as ${c.category ?? ""}`}
+                      >
+                        ◌
+                      </span>
+                    )}
                     <span className="grid-col-name">{c.name}</span>
                     {notNullMissing && <span className="col-notnull-dot" title="NOT NULL" />}
                     <span className="grid-col-type mono">{c.data_type}</span>
