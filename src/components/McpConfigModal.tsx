@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api, type McpSnippet, type McpTarget } from "../lib/api";
 import { useCopyFeedback } from "../lib/useCopyFeedback";
+import { Modal } from "./Modal";
 
 export function McpConfigModal({ onClose }: { onClose: () => void }) {
   const [snip, setSnip] = useState<McpSnippet | null>(null);
@@ -38,13 +39,8 @@ export function McpConfigModal({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 580 }}
-      >
-        <h2>MCP config snippet</h2>
+    <Modal onClose={onClose} style={{ width: 580 }}>
+      <h2>MCP config snippet</h2>
 
         {snip && snip.targets.length > 1 && (
           <div className="mcp-tabs" role="tablist">
@@ -101,7 +97,6 @@ export function McpConfigModal({ onClose }: { onClose: () => void }) {
             {copied ? "Copied!" : "Copy snippet"}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
