@@ -32,6 +32,13 @@ type EditingCell =
   | { kind: "row"; rowIdx: number; col: string }
   | { kind: "add"; tempId: string; col: string };
 
+type SortState = { col: string; dir: "asc" | "desc" };
+
+// Sentinel column id for the row-number column. Sorting by this column is
+// equivalent to ordering by original row index — useful as an explicit "back
+// to SQL output order" affordance.
+const ROW_IDX_COL = "__rowidx__";
+
 export function ResultsGrid(props: Props) {
   const {
     result,
@@ -54,6 +61,23 @@ export function ResultsGrid(props: Props) {
 
   // Keyboard: ⌘N starts add, Delete deletes selected row.
   const [selectedRow, setSelectedRow] = useState<number | null>(null);
+
+  // Sort is view-only — display order changes, but `batch` and callbacks
+  // continue to address rows by their original index in `result.rows`.
+  const [sort, setSort] = useState<SortState | null>(null);
+  useEffect(() => {
+    setSort(null);
+    setSelectedRow(null);
+    setEditing(null);
+  }, [result]);
+
+  function toggleSort(col: string) {
+    setSort((prev) => {
+      if (!prev || prev.col !== col) return { col, dir: "asc" };
+      if (prev.dir === "asc") return { col, dir: "desc" };
+      return null;
+    });
+  }
 
   function onGridKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     // Bail when a cell editor input/textarea is focused inside the grid.
@@ -78,6 +102,33 @@ export function ResultsGrid(props: Props) {
     return m;
   }, [columnsMeta]);
 
+  const displayRows = useMemo(() => {
+    if (!result) return [] as { row: (string | null)[]; origIdx: number }[];
+    const base = result.rows.map((row, origIdx) => ({ row, origIdx }));
+    if (!sort) return base;
+    if (sort.col === ROW_IDX_COL) {
+      const dir = sort.dir === "asc" ? 1 : -1;
+      return [...base].sort((a, b) => (a.origIdx - b.origIdx) * dir);
+    }
+    const colIdx = result.columns.findIndex((c) => c.name === sort.col);
+    if (colIdx === -1) return base;
+    const dataType =
+      colTypeByName.get(sort.col)?.data_type ?? result.columns[colIdx].data_type;
+    const cmp = makeComparator(dataType);
+    const dir = sort.dir === "asc" ? 1 : -1;
+    return [...base].sort((a, b) => {
+      const av = a.row[colIdx];
+      const bv = b.row[colIdx];
+      // Treat NULL as "greater than" any value, matching Postgres defaults:
+      // NULLS LAST for asc, NULLS FIRST for desc.
+      if (av === null && bv === null) return a.origIdx - b.origIdx;
+      if (av === null) return 1 * dir;
+      if (bv === null) return -1 * dir;
+      const c = cmp(av, bv);
+      return c === 0 ? a.origIdx - b.origIdx : c * dir;
+    });
+  }, [result, sort, colTypeByName]);
+
   if (error) {
     return (
       <div className="grid-wrap">
@@ -98,15 +149,70 @@ export function ResultsGrid(props: Props) {
       <table className={`grid${editable ? " editable" : ""}`}>
         <thead>
           <tr>
-            <th className="grid-rownum" aria-label="row number">#</th>
+            {(() => {
+              const active = sort?.col === ROW_IDX_COL;
+              const sortCls = active ? ` sorted ${sort!.dir}` : "";
+              const ariaSort: "ascending" | "descending" | "none" = active
+                ? sort!.dir === "asc"
+                  ? "ascending"
+                  : "descending"
+                : "none";
+              return (
+                <th
+                  className={`grid-rownum sortable${sortCls}`}
+                  aria-label="row number"
+                  aria-sort={ariaSort}
+                  onClick={() => toggleSort(ROW_IDX_COL)}
+                  title={
+                    active
+                      ? sort!.dir === "asc"
+                        ? "Original order — click for reverse"
+                        : "Reverse order — click to clear"
+                      : "Click to restore original order"
+                  }
+                >
+                  {active ? (
+                    <span className="sort-indicator" aria-hidden>
+                      {sort!.dir === "asc" ? "▲" : "▼"}
+                    </span>
+                  ) : (
+                    "#"
+                  )}
+                </th>
+              );
+            })()}
             {result.columns.map((c) => {
               const meta = colTypeByName.get(c.name);
               const notNullMissing =
                 editable && meta && !meta.is_nullable && !meta.default;
+              const active = sort?.col === c.name;
+              const sortCls = active ? ` sorted ${sort!.dir}` : "";
+              const ariaSort: "ascending" | "descending" | "none" = active
+                ? sort!.dir === "asc"
+                  ? "ascending"
+                  : "descending"
+                : "none";
               return (
-                <th key={c.name}>
+                <th
+                  key={c.name}
+                  className={`sortable${sortCls}`}
+                  aria-sort={ariaSort}
+                  onClick={() => toggleSort(c.name)}
+                  title={
+                    active
+                      ? sort!.dir === "asc"
+                        ? "Sorted ascending — click for descending"
+                        : "Sorted descending — click to clear"
+                      : "Click to sort ascending"
+                  }
+                >
                   <div className="th-content">
                     <span className="grid-col-name">{c.name}</span>
+                    {active && (
+                      <span className="sort-indicator" aria-hidden>
+                        {sort!.dir === "asc" ? "▲" : "▼"}
+                      </span>
+                    )}
                     {notNullMissing && <span className="col-notnull-dot" title="NOT NULL" />}
                     <span className="grid-col-type mono">{c.data_type}</span>
                   </div>
@@ -116,7 +222,7 @@ export function ResultsGrid(props: Props) {
           </tr>
         </thead>
         <tbody>
-          {result.rows.map((row, ri) => {
+          {displayRows.map(({ row, origIdx: ri }) => {
             const deleted = isDeleted(batch, ri);
             const isSel = selectedRow === ri;
             return (
@@ -451,6 +557,30 @@ function CellEditor(props: {
       </div>
     </div>
   );
+}
+
+function makeComparator(dataType: string): (a: string, b: string) => number {
+  const t = dataType.toLowerCase();
+  const numeric =
+    /^(small|big)?int|^int\d?|^numeric|^decimal|^real|^double|^float|^serial/.test(t);
+  const date = t.startsWith("date") || t.startsWith("timestamp") || t.startsWith("time");
+  if (numeric) {
+    return (a, b) => {
+      const na = Number(a);
+      const nb = Number(b);
+      if (Number.isNaN(na) || Number.isNaN(nb)) return a.localeCompare(b);
+      return na - nb;
+    };
+  }
+  if (date) {
+    return (a, b) => {
+      const da = Date.parse(a);
+      const db = Date.parse(b);
+      if (Number.isNaN(da) || Number.isNaN(db)) return a.localeCompare(b);
+      return da - db;
+    };
+  }
+  return (a, b) => a.localeCompare(b, undefined, { numeric: true });
 }
 
 function normalizeForDateInput(s: string, inputType: "date" | "datetime-local"): string {
