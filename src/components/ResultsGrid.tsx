@@ -466,6 +466,7 @@ export function ResultsGrid(props: Props) {
                       </td>
                     );
                   }
+                  const colLocked = !!col.redacted;
                   return (
                     <td
                       key={ci}
@@ -473,10 +474,16 @@ export function ResultsGrid(props: Props) {
                       style={boxShadow ? { boxShadow } : undefined}
                       onClick={deleted ? undefined : (e) => clickCell(displayRow, ci, e)}
                       onDoubleClick={() => {
-                        if (!editable || deleted) return;
+                        if (!editable || deleted || colLocked) return;
                         setEditing({ kind: "row", rowIdx: ri, col: col.name });
                       }}
-                      title={editable && !deleted ? "Double-click to edit" : undefined}
+                      title={
+                        colLocked
+                          ? "Redacted column — toggle View > Reveal sensitive data to edit"
+                          : editable && !deleted
+                            ? "Double-click to edit"
+                            : undefined
+                      }
                     >
                       {isNull ? "null" : displayValue}
                     </td>

@@ -223,6 +223,15 @@ export function ExportMenu({
               />
             </>
           )}
+          {result?.redaction_meta && (
+            <div className="export-menu-footnote">
+              <span aria-hidden style={{ color: "var(--privacy)", marginRight: 6 }}>◌</span>
+              Exporting masked values for{" "}
+              <span className="mono">{result.redaction_meta.redacted_columns.length}</span> column
+              {result.redaction_meta.redacted_columns.length === 1 ? "" : "s"}. Toggle{" "}
+              <span className="mono">View &gt; Reveal sensitive data</span> to export real values.
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -1001,6 +1001,16 @@ body.dragging-y * { cursor: inherit !important; }
   margin: 4px 4px;
 }
 
+.export-menu-footnote {
+  padding: 8px 12px;
+  border-top: 1px solid var(--line-faint);
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  background: var(--privacy-soft);
+  line-height: 1.4;
+}
+
 /* ── Toast ────────────────────────────────────────────────────────── */
 
 .toast {
@@ -1666,4 +1676,37 @@ body.dragging-y * { cursor: inherit !important; }
   font-size: 10px;
   padding: 2px 4px;
   letter-spacing: 0.04em;
+}
+
+/* Schema tree privacy affordances */
+.tree-privacy-badge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--privacy-soft);
+  border: 1px solid var(--privacy-line);
+  border-radius: var(--r-sm);
+  padding: 0 5px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 14px;
+  color: var(--privacy);
+  cursor: pointer;
+}
+.tree-privacy-badge.pending {
+  /* Dashed border on pending — there's still review work to do. */
+  border-style: dashed;
+  opacity: 0.85;
+}
+.tree-privacy-badge:hover {
+  background: var(--bg-elevated-2);
+  color: var(--text-primary);
+}
+.tree-privacy-col-glyph {
+  flex: 0 0 auto;
+  color: var(--privacy);
+  font-size: 11px;
+  margin-right: 4px;
+  line-height: 1;
 }
