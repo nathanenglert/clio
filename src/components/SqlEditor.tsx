@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import CodeMirror, { EditorView, keymap, type ReactCodeMirrorProps } from "@uiw/react-codemirror";
 import { sql, PostgreSQL } from "@codemirror/lang-sql";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { undo, redo } from "@codemirror/commands";
 import { tags as t } from "@lezer/highlight";
 
 type Props = {
@@ -64,6 +65,25 @@ export function SqlEditor({ value, onChange, onRun, readOnly, height }: Props) {
     const exts = [
       sql({ dialect: PostgreSQL, upperCaseKeywords: false }),
       syntaxHighlighting(highlight),
+      // In the Tauri webview, ⌘Z / ⌘⇧Z don't dispatch a keydown for the
+      // letter (the OS routes them through the Edit menu instead). They
+      // surface as `beforeinput` events with inputType "historyUndo" /
+      // "historyRedo", which CodeMirror's historyKeymap doesn't bind. We
+      // catch them here so undo works after paste — paste's preventDefault
+      // means WebKit's native undo manager has no record of the change.
+      EditorView.domEventHandlers({
+        beforeinput(event, view) {
+          if (event.inputType === "historyUndo") {
+            event.preventDefault();
+            return undo(view);
+          }
+          if (event.inputType === "historyRedo") {
+            event.preventDefault();
+            return redo(view);
+          }
+          return false;
+        },
+      }),
     ];
     if (onRun) {
       exts.push(

@@ -11,7 +11,10 @@ use activity::{mcp_emitter, spawn_socket_listener, tauri_emitter};
 use core::Core;
 use pool::PoolRegistry;
 use rmcp::{transport::stdio, ServiceExt};
-use tauri::{Manager, State};
+use tauri::{
+    menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu},
+    Manager, Runtime, State,
+};
 use types::*;
 
 // ── Tauri commands (UI side) ──────────────────────────────────────
@@ -165,6 +168,84 @@ fn format_err(e: anyhow::Error) -> String {
     format!("{:#}", e)
 }
 
+/// Mirrors `tauri::menu::Menu::default()` but omits the Edit menu's
+/// Undo/Redo items. Why: CodeMirror's paste handler calls preventDefault,
+/// so WebKit's native undo manager has no record of the change. The macOS
+/// Edit > Undo item then becomes disabled — and crucially, ⌘Z stops
+/// dispatching ANY event to JS (not even a keydown for "z"). Removing the
+/// menu binding lets ⌘Z reach the editor as a normal keydown, where
+/// CodeMirror's historyKeymap handles it.
+fn build_app_menu<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let pkg = app.package_info();
+    let config = app.config();
+    let about = AboutMetadata {
+        name: Some(pkg.name.clone()),
+        version: Some(pkg.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+
+    let app_menu = Submenu::with_items(
+        app,
+        pkg.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+
+    let file_menu = Submenu::with_items(
+        app,
+        "File",
+        true,
+        &[&PredefinedMenuItem::close_window(app, None)?],
+    )?;
+
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
+    let view_menu = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[&PredefinedMenuItem::fullscreen(app, None)?],
+    )?;
+
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+
+    Menu::with_items(
+        app,
+        &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu],
+    )
+}
+
 // ── Entry points ──────────────────────────────────────────────────
 
 /// UI mode: launch Tauri with full state + activity socket listener.
@@ -183,6 +264,10 @@ pub fn run() {
     builder
         .setup(|app| {
             let handle = app.handle().clone();
+            // Install the custom menu (no Undo/Redo) so ⌘Z is not bound at
+            // the OS level — see build_app_menu for the why.
+            let menu = build_app_menu(&handle)?;
+            app.set_menu(menu)?;
             // Build Core synchronously on the async runtime, then manage it
             // before invoke_handler can run any commands.
             let core = tauri::async_runtime::block_on(async {
