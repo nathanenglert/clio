@@ -250,7 +250,7 @@ fn build_app_menu<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R
 
 /// UI mode: launch Tauri with full state + activity socket listener.
 pub fn run() {
-    init_tracing();
+    init_tracing(false);
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -309,7 +309,7 @@ pub fn run() {
 /// MCP mode: run the rmcp stdio server only. No UI window.
 /// Logs to stderr because stdout is the MCP transport.
 pub fn run_mcp() {
-    init_tracing_stderr();
+    init_tracing(true);
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async move {
@@ -340,22 +340,16 @@ pub fn run_mcp() {
     });
 }
 
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
-}
-
-fn init_tracing_stderr() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
+fn init_tracing(to_stderr: bool) {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt().with_env_filter(env_filter);
+    let _ = if to_stderr {
+        builder
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .try_init()
+    } else {
+        builder.try_init()
+    };
 }
