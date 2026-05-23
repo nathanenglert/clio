@@ -25,9 +25,20 @@ export type ColumnDescription = Column & {
   enum_values?: string[];
 };
 
+export type Category = "phi" | "pci" | "pii";
+
 export type ColumnMeta = {
   name: string;
   data_type: string;
+  /** Whether the values in this column were replaced by the redactor. */
+  redacted?: boolean;
+  /** Classification category that fired; only present when redacted. */
+  category?: Category;
+};
+
+export type RedactionMeta = {
+  redacted_columns: string[];
+  note: string;
 };
 
 export type QueryResult = {
@@ -36,6 +47,8 @@ export type QueryResult = {
   row_count: number;
   truncated: boolean;
   elapsed_ms: number;
+  /** Present when one or more columns were redacted. */
+  redaction_meta?: RedactionMeta;
 };
 
 export type ExportResult = {
@@ -118,6 +131,33 @@ export type NewConnectionInput = {
   ssl_mode: string;
 };
 
+// ── Sensitivity classifications (per-connection) ─────────────────
+// Mirrors src-tauri/src/types.rs. See design/redaction.md.
+
+export type ClassificationStatus = "pending" | "confirmed";
+
+export type Classification = {
+  schema: string;
+  table: string;
+  column: string;
+  category: Category;
+  status: ClassificationStatus;
+  reason: string;
+  created_at: number;
+};
+
+export type ClassifyOutcome = {
+  new_pending: number;
+  already_classified: number;
+  total_classified: number;
+};
+
+export type ClassificationAction =
+  | { kind: "confirm" }
+  | { kind: "remove" }
+  | { kind: "set_category"; category: Category }
+  | { kind: "add_manual"; category: Category };
+
 export const api = {
   list_connections: () => invoke<Connection[]>("list_connections"),
   add_connection: (input: NewConnectionInput) =>
@@ -136,15 +176,38 @@ export const api = {
       schema,
       table,
     }),
-  run_query: (connection: string, sql: string) =>
-    invoke<QueryResult>("run_query", { connection, sql }),
+  run_query: (connection: string, sql: string, reveal: boolean = false) =>
+    invoke<QueryResult>("run_query", { connection, sql, reveal }),
   apply_mutations: (connection: string, batch: MutationBatch) =>
     invoke<MutationOutcome>("apply_mutations", { connection, batch }),
-  export_query: (connection: string, sql: string, path: string, format: "csv" | "json") =>
-    invoke<ExportResult>("export_query", { connection, sql, path, format }),
+  export_query: (
+    connection: string,
+    sql: string,
+    path: string,
+    format: "csv" | "json",
+    reveal: boolean = false,
+  ) => invoke<ExportResult>("export_query", { connection, sql, path, format, reveal }),
   write_file: (path: string, content: string) =>
     invoke<number>("write_file", { path, content }),
   mcp_snippet: () => invoke<McpSnippet>("mcp_snippet"),
+  classify_schema: (connection: string) =>
+    invoke<ClassifyOutcome>("classify_schema", { connection }),
+  list_classifications: (connection: string) =>
+    invoke<Classification[]>("list_classifications", { connection }),
+  update_classification: (
+    connection: string,
+    schema: string,
+    table: string,
+    column: string,
+    action: ClassificationAction,
+  ) =>
+    invoke<void>("update_classification", {
+      connection,
+      schema,
+      table,
+      column,
+      action,
+    }),
 };
 
 export function onActivity(

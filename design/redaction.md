@@ -328,8 +328,10 @@ A single boolean: **Reveal sensitive data**. Default `off`.
 ### Where it lives
 
 - **View menu** (Tauri menu): `View > Reveal sensitive data` checkbox item, bound to
-  `⌘⇧R`. Toggling fires no confirmation dialog — it's reversible and only affects
-  the UI.
+  `⌘⌥R` (Cmd+Alt+R). Toggling fires no confirmation dialog — it's reversible and
+  only affects the UI. *(Originally specced as ⌘⇧R; switched to ⌘⌥R because
+  ⌘⇧R is the WebKit "hard reload" binding and reloaded the page instead of
+  firing the menu accelerator in dev mode.)*
 - **Status bar policy chip**: when reveal is on, the chip text changes from
   `policy · default` to `policy · default · revealing` with a `--op-destruct` left edge.
   Click → opens the View menu.

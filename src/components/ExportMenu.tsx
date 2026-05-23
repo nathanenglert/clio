@@ -20,6 +20,9 @@ type Props = {
   /** Imperative trigger — bump this number to open the menu (e.g. from ⌘E). */
   openSignal?: number;
   disabled?: boolean;
+  /** Mirror of the View > Reveal toggle. When false, server-side export
+   *  applies the same redaction the UI shows. */
+  reveal?: boolean;
 };
 
 type Action =
@@ -34,6 +37,7 @@ export function ExportMenu({
   connectionName,
   openSignal,
   disabled,
+  reveal,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -111,7 +115,7 @@ export function ExportMenu({
             filters: filtersFor(action.format),
           });
           if (!path) return;
-          const r = await api.export_query(connectionName, sql, path, action.format);
+          const r = await api.export_query(connectionName, sql, path, action.format, !!reveal);
           showToast(
             `Exported ${r.row_count.toLocaleString()} rows → ${basename(path)}`
           );
@@ -124,7 +128,7 @@ export function ExportMenu({
         triggerRef.current?.focus();
       }
     },
-    [busy, result, connectionName, sql, tabTitle]
+    [busy, result, connectionName, sql, tabTitle, reveal]
   );
 
   const truncated = result?.truncated ?? false;

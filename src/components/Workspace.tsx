@@ -21,6 +21,8 @@ type Props = {
   onOpenMcpModal: () => void;
   /** Editing state hook (App-owned). */
   editing: ReturnType<typeof useEditing>;
+  /** Mirror of the View > Reveal sensitive data toggle. UI-only. */
+  reveal: boolean;
 };
 
 export function Workspace({
@@ -34,6 +36,7 @@ export function Workspace({
   onRun,
   onOpenMcpModal,
   editing,
+  reveal,
 }: Props) {
   const editor = useResizable({
     storageKey: "db.layout.editor.height",
@@ -198,6 +201,7 @@ export function Workspace({
           tabTitle={activeTab?.title ?? "query"}
           connectionName={active.name}
           openSignal={exportOpenSignal}
+          reveal={reveal}
         />
         <button
           className="editor-btn"

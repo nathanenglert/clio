@@ -1420,3 +1420,72 @@ body.dragging-y * { cursor: inherit !important; }
   border-top: 1px solid var(--line-default);
 }
 .review-foot .spacer { flex: 1; }
+
+/* ── Sensitivity / redaction ──────────────────────────────────────── */
+
+/* Column header glyph + treatment on redacted columns. The dotted-circle
+   glyph (◌) is the design system's privacy marker — see design/redaction.md. */
+.col-privacy-glyph {
+  flex: 0 0 auto;
+  color: var(--privacy);
+  font-size: 12px;
+  line-height: 1;
+  margin-right: -4px;     /* tighten against the column name */
+  font-feature-settings: 'tnum';
+}
+.grid thead th.col-redacted {
+  /* Faint slate wash so the header is unmistakable at a glance. */
+  background: linear-gradient(
+    to bottom,
+    var(--bg-panel) 0%,
+    var(--bg-panel) calc(100% - 1px),
+    var(--privacy-line) 100%
+  );
+}
+
+/* Status-bar treatment when View > Reveal sensitive data is ON. The bar
+   gains a red top edge and a "revealing" chip — explicit warning that the
+   user is looking at real PII/PHI/PCI in this workbench. The MCP path is
+   unaffected (see useReveal). */
+.status.status--revealing {
+  border-top: 1px solid var(--op-destruct);
+  background: rgba(217, 108, 84, 0.04);
+}
+.status-reveal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--op-destruct);
+  border-radius: var(--r-sm);
+  background: var(--op-destruct-soft);
+  color: var(--op-destruct);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+  cursor: help;
+}
+
+/* Persistent banner above the workspace whenever revealing is on. The whole
+   point is to be unmissable — peripheral red wash + a clear "Hide" hint. */
+.reveal-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: rgba(217, 108, 84, 0.06);
+  border-bottom: 1px solid var(--op-destruct-soft);
+  color: var(--text-primary);
+  font-size: var(--fs-xs);
+}
+.reveal-banner-glyph {
+  color: var(--op-destruct);
+  font-size: 12px;
+  line-height: 1;
+}
+.reveal-banner-hint {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 10px;
+}
