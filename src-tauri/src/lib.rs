@@ -69,8 +69,15 @@ async fn describe_table(
 }
 
 #[tauri::command]
-async fn run_query(state: State<'_, Core>, connection: String, sql: String) -> Result<QueryResult, String> {
-    core::run_query(&state, &connection, &sql)
+async fn run_query(
+    state: State<'_, Core>,
+    connection: String,
+    sql: String,
+    reveal: Option<bool>,
+) -> Result<QueryResult, String> {
+    // `reveal` is UI-only. Default false (mask). The MCP handler hardcodes
+    // false at the call site (see mcp.rs).
+    core::run_query(&state, &connection, &sql, reveal.unwrap_or(false))
         .await
         .map_err(format_err)
 }
@@ -93,15 +100,57 @@ async fn export_query(
     sql: String,
     path: String,
     format: String,
+    reveal: Option<bool>,
 ) -> Result<ExportResult, String> {
-    core::export_query(&state, &connection, &sql, &path, &format)
-        .await
-        .map_err(format_err)
+    core::export_query(
+        &state,
+        &connection,
+        &sql,
+        &path,
+        &format,
+        reveal.unwrap_or(false),
+    )
+    .await
+    .map_err(format_err)
 }
 
 #[tauri::command]
 fn write_file(path: String, content: String) -> Result<u64, String> {
     core::write_file(&path, content.as_bytes()).map_err(format_err)
+}
+
+#[tauri::command]
+async fn classify_schema(
+    state: State<'_, Core>,
+    connection: String,
+) -> Result<ClassifyOutcome, String> {
+    core::classify_schema(&state, &connection)
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
+async fn list_classifications(
+    state: State<'_, Core>,
+    connection: String,
+) -> Result<Vec<Classification>, String> {
+    core::list_classifications(&state, &connection)
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
+async fn update_classification(
+    state: State<'_, Core>,
+    connection: String,
+    schema: String,
+    table: String,
+    column: String,
+    action: ClassificationAction,
+) -> Result<(), String> {
+    core::update_classification(&state, &connection, &schema, &table, &column, action)
+        .await
+        .map_err(format_err)
 }
 
 #[tauri::command]
@@ -281,6 +330,7 @@ pub fn run() {
                     pools,
                     emit,
                     source: "ui".into(),
+                    redactor_cache: Default::default(),
                 }
             });
             handle.manage(core);
@@ -301,6 +351,9 @@ pub fn run() {
             export_query,
             write_file,
             mcp_snippet,
+            classify_schema,
+            list_classifications,
+            update_classification,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -319,6 +372,7 @@ pub fn run_mcp() {
             pools: PoolRegistry::default(),
             emit: mcp_emitter(),
             source: "mcp".into(),
+            redactor_cache: Default::default(),
         };
         let server = mcp::McpServer::new(core);
         let service = match server.serve(stdio()).await {

@@ -43,7 +43,13 @@ pub async fn connect(core: &Core, name: &str) -> Result<()> {
     let started = Instant::now();
     let r = async {
         let c = connections::get(&core.meta, name).await?;
-        core.pools.connect(&c).await.map(|_| ())
+        core.pools.connect(&c).await.map(|_| ())?;
+        // Run the heuristic classifier synchronously. The privacy guarantee
+        // ("MCP returns redacted data after connect") depends on this
+        // completing before the connect call returns to the agent. Failures
+        // are surfaced but don't tear down the pool — see classify_schema.
+        let _ = super::sensitivity::classify_schema(core, name).await;
+        Ok::<_, anyhow::Error>(())
     }
     .await;
     core.record_ok("connect", name, started, &r);
@@ -53,6 +59,7 @@ pub async fn connect(core: &Core, name: &str) -> Result<()> {
 pub async fn disconnect(core: &Core, name: &str) -> Result<()> {
     let started = Instant::now();
     core.pools.drop_pool(name).await;
+    core.redactor_cache.invalidate(name).await;
     let r: Result<()> = Ok(());
     core.record_ok("disconnect", name, started, &r);
     r

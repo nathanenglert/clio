@@ -4,12 +4,24 @@ use sqlx::{Column, Row, TypeInfo};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
+use crate::connections;
 use crate::types::ExportResult;
 
 use super::query::decode_cell;
+use super::redactor::{fake_for, RedactorView};
 use super::Core;
+
+/// Internal: per-export redactor lookup keyed by **result-column index**.
+/// Built once before streaming. `None` entries mean "leave alone".
+struct ColRedactor {
+    table_oid: i32,
+    attnum: i16,
+    column_name: String,
+    pg_type: String,
+}
 
 // Bypasses the run_query ROW_CAP by streaming directly from sqlx to a file
 // the user picked via the dialog plugin. No intermediate buffering of the
@@ -20,6 +32,7 @@ pub async fn export_query(
     sql: &str,
     path: &str,
     format: &str,
+    reveal: bool,
 ) -> Result<ExportResult> {
     let started = Instant::now();
     let r = async {
@@ -29,6 +42,15 @@ pub async fn export_query(
         }
         let pool = core.pools.ensure(&core.meta, conn).await?;
 
+        let redactor_view: Option<Arc<RedactorView>> = if reveal {
+            None
+        } else {
+            let connection = connections::get(&core.meta, conn).await?;
+            core.redactor_cache
+                .view_for(&core.meta, &pool, conn, &connection.id)
+                .await?
+        };
+
         let file = File::create(Path::new(path))
             .with_context(|| format!("create file {}", path))?;
         let mut w = BufWriter::new(file);
@@ -36,6 +58,7 @@ pub async fn export_query(
         let mut stream = sqlx::query(sql).fetch(&pool);
         let mut row_count: usize = 0;
         let mut columns: Vec<(String, String)> = Vec::new();
+        let mut redactors: Vec<Option<ColRedactor>> = Vec::new();
 
         if format == "csv" {
             // UTF-8 BOM so Excel reads non-ASCII correctly.
@@ -53,18 +76,35 @@ pub async fn export_query(
                     .iter()
                     .map(|c| (c.name().to_string(), c.type_info().name().to_string()))
                     .collect();
+                redactors = row
+                    .columns()
+                    .iter()
+                    .map(|c| {
+                        let view = redactor_view.as_ref()?;
+                        let oid = c.relation_id()?;
+                        let attnum = c.relation_attribute_no()?;
+                        let cc = view.by_oid.get(&(oid.0 as i32, attnum))?;
+                        Some(ColRedactor {
+                            table_oid: oid.0 as i32,
+                            attnum,
+                            column_name: cc.column_name.clone(),
+                            pg_type: c.type_info().name().to_string(),
+                        })
+                    })
+                    .collect();
                 if format == "csv" {
                     write_csv_header(&mut w, &columns)?;
                 }
             }
+            let secret = redactor_view.as_ref().map(|v| v.secret.clone());
             match format {
-                "csv" => write_csv_row(&mut w, &row, &columns)?,
+                "csv" => write_csv_row(&mut w, &row, &columns, &redactors, secret.as_ref())?,
                 "json" => {
                     if !first_row {
                         w.write_all(b",")?;
                     }
                     w.write_all(b"\n  ")?;
-                    write_json_row(&mut w, &row, &columns)?;
+                    write_json_row(&mut w, &row, &columns, &redactors, secret.as_ref())?;
                 }
                 _ => unreachable!(),
             }
@@ -130,13 +170,26 @@ fn write_csv_row<W: Write>(
     w: &mut W,
     row: &sqlx::postgres::PgRow,
     columns: &[(String, String)],
+    redactors: &[Option<ColRedactor>],
+    secret: Option<&Arc<[u8; 32]>>,
 ) -> std::io::Result<()> {
     for i in 0..columns.len() {
         if i > 0 {
             w.write_all(b",")?;
         }
         if let Some(s) = decode_cell(row, i) {
-            write_csv_field(w, &s)?;
+            let cooked = match (redactors.get(i).and_then(|r| r.as_ref()), secret) {
+                (Some(r), Some(secret)) => fake_for(
+                    secret.as_ref(),
+                    r.table_oid,
+                    r.attnum,
+                    &r.column_name,
+                    &r.pg_type,
+                    &s,
+                ),
+                _ => s,
+            };
+            write_csv_field(w, &cooked)?;
         }
     }
     w.write_all(b"\r\n")
@@ -165,6 +218,8 @@ fn write_json_row<W: Write>(
     w: &mut W,
     row: &sqlx::postgres::PgRow,
     columns: &[(String, String)],
+    redactors: &[Option<ColRedactor>],
+    secret: Option<&Arc<[u8; 32]>>,
 ) -> std::io::Result<()> {
     w.write_all(b"{")?;
     for (i, (name, pg_type)) in columns.iter().enumerate() {
@@ -175,7 +230,26 @@ fn write_json_row<W: Write>(
             .unwrap_or_else(|_| format!("\"{}\"", name.replace('"', "\\\"")));
         w.write_all(key.as_bytes())?;
         w.write_all(b": ")?;
-        let value = decode_cell_for_json(row, i, pg_type);
+        let value = match (redactors.get(i).and_then(|r| r.as_ref()), secret) {
+            (Some(r), Some(secret)) => {
+                // Redacted cells serialize as a JSON string of the fake — same
+                // shape the UI sees. We bypass type-preserving JSON encoding
+                // because the fake replaces the real value entirely.
+                let raw = decode_cell(row, i);
+                match raw {
+                    None => serde_json::Value::Null,
+                    Some(s) => serde_json::Value::String(fake_for(
+                        secret.as_ref(),
+                        r.table_oid,
+                        r.attnum,
+                        &r.column_name,
+                        &r.pg_type,
+                        &s,
+                    )),
+                }
+            }
+            _ => decode_cell_for_json(row, i, pg_type),
+        };
         let value_s = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
         w.write_all(value_s.as_bytes())?;
     }

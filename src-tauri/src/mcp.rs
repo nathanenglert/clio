@@ -115,12 +115,16 @@ impl McpServer {
         ok_json(r)
     }
 
-    #[tool(description = "Run a SELECT (or WITH-prefixed SELECT) and return columns + rows. Writes/DDL are rejected at the POC seam. Capped at 1000 rows; the `truncated` field signals overflow.")]
+    #[tool(description = "Run a SELECT (or WITH-prefixed SELECT) and return columns + rows. Writes/DDL are rejected at the POC seam. Capped at 1000 rows; the `truncated` field signals overflow. Columns classified as PHI/PCI/PII are always redacted on the MCP path — see redaction_meta.")]
     async fn run_query(
         &self,
         Parameters(QueryArg { connection, sql }): Parameters<QueryArg>,
     ) -> Result<CallToolResult, McpError> {
-        let r = core::run_query(&self.core, &connection, &sql)
+        // ── Privacy invariant ─────────────────────────────────────
+        // The MCP handler ALWAYS calls core::run_query with reveal=false. The
+        // workbench UI's `View > Reveal sensitive data` toggle CANNOT reach
+        // this code path — see design/redaction.md §"MCP scope".
+        let r = core::run_query(&self.core, &connection, &sql, /* reveal */ false)
             .await
             .map_err(err)?;
         ok_json(r)

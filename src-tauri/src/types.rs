@@ -52,6 +52,18 @@ pub struct ColumnDescription {
 pub struct ColumnMeta {
     pub name: String,
     pub data_type: String,
+    /// True when the redactor replaced this column's values with fake data.
+    /// Always false when the column was not classified or when `reveal` was on
+    /// (UI-only). Always reflects the real treatment of the data shipped in `rows`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub redacted: bool,
+    /// Category of the classification that fired (PHI/PCI/PII), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<Category>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +73,17 @@ pub struct QueryResult {
     pub row_count: usize,
     pub truncated: bool,
     pub elapsed_ms: u64,
+    /// Present only when one or more result columns were redacted. Lets the MCP
+    /// serializer attach a single human-readable footer line so the agent knows
+    /// the data is masked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction_meta: Option<RedactionMeta>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RedactionMeta {
+    pub redacted_columns: Vec<String>,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -168,4 +191,94 @@ pub struct McpTarget {
 pub struct McpSnippet {
     pub binary_path: String,
     pub targets: Vec<McpTarget>,
+}
+
+// ── Sensitivity classifications (PHI / PCI / PII) ─────────────────
+//
+// See design/redaction.md. Storage lives in the metadata SQLite next to the
+// connection record; the redaction secret lives in the keychain. The MCP
+// server cannot disable redaction — see core::run_query.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Category {
+    Phi,
+    Pci,
+    Pii,
+}
+
+impl Category {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Category::Phi => "phi",
+            Category::Pci => "pci",
+            Category::Pii => "pii",
+        }
+    }
+    pub fn from_db(s: &str) -> Option<Self> {
+        match s {
+            "phi" => Some(Category::Phi),
+            "pci" => Some(Category::Pci),
+            "pii" => Some(Category::Pii),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClassificationStatus {
+    /// Suggested by the heuristic classifier, awaiting user review. Still
+    /// applied to redaction — safe default.
+    Pending,
+    /// User-reviewed and accepted.
+    Confirmed,
+}
+
+impl ClassificationStatus {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            ClassificationStatus::Pending => "pending",
+            ClassificationStatus::Confirmed => "confirmed",
+        }
+    }
+    pub fn from_db(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(ClassificationStatus::Pending),
+            "confirmed" => Some(ClassificationStatus::Confirmed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Classification {
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub category: Category,
+    pub status: ClassificationStatus,
+    /// Human-readable reason: "matched 'email'" or "manual".
+    pub reason: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClassifyOutcome {
+    pub new_pending: u32,
+    pub already_classified: u32,
+    pub total_classified: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClassificationAction {
+    /// Pending → Confirmed.
+    Confirm,
+    /// Remove the classification entirely.
+    Remove,
+    /// Change category; leaves status as-is.
+    SetCategory { category: Category },
+    /// Insert a new Confirmed classification (manual add path).
+    AddManual { category: Category },
 }

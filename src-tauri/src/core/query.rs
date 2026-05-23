@@ -2,14 +2,25 @@ use anyhow::{anyhow, Context, Result};
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::time::Instant;
 
-use crate::types::{ColumnMeta, QueryResult};
+use crate::connections;
+use crate::types::{ColumnMeta, QueryResult, RedactionMeta};
 
+use super::redactor::{fake_for, RedactorView};
 use super::Core;
 
 const ROW_CAP: usize = 1000;
 
 /// Cap full-text payloads (e.g. SQL) emitted on activity events.
 const PAYLOAD_MAX_BYTES: usize = 4096;
+
+/// Per-result-column redaction target. Built from sqlx's per-column
+/// `relation_id` + `relation_attribute_no` joined against the redactor view.
+struct RedactionTarget {
+    table_oid: i32,
+    attnum: i16,
+    column_name: String,
+    pg_type: String,
+}
 
 fn cap_payload(s: &str) -> String {
     if s.len() <= PAYLOAD_MAX_BYTES {
@@ -93,45 +104,132 @@ fn strip_comments_lower(sql: &str) -> String {
     out
 }
 
-pub async fn run_query(core: &Core, conn: &str, sql: &str) -> Result<QueryResult> {
+/// Run a query and post-process the rows through the redactor.
+///
+/// `reveal` skips the redactor pass entirely. The MCP tool handler hardcodes
+/// `reveal: false`; only the Tauri UI command may pass `true`, and only when
+/// the user explicitly enabled `View > Reveal sensitive data`.
+pub async fn run_query(
+    core: &Core,
+    conn: &str,
+    sql: &str,
+    reveal: bool,
+) -> Result<QueryResult> {
     let started = Instant::now();
     let r = async {
         validate_select_only(sql)?;
         let pool = core.pools.ensure(&core.meta, conn).await?;
+
+        // Look up the redactor view *before* running the query so we can use
+        // the per-column source info (relation_id / attribute_no) reported by
+        // sqlx. Skipped entirely when `reveal` is on or when the connection
+        // has no classifications — see RedactorCache::view_for.
+        let redactor_view: Option<std::sync::Arc<RedactorView>> = if reveal {
+            None
+        } else {
+            let connection = connections::get(&core.meta, conn).await?;
+            core.redactor_cache
+                .view_for(&core.meta, &pool, conn, &connection.id)
+                .await?
+        };
+
         let rows = sqlx::query(sql)
             .fetch_all(&pool)
             .await
             .with_context(|| "query failed")?;
-        let columns: Vec<ColumnMeta> = rows
-            .first()
-            .map(|r| {
-                r.columns()
-                    .iter()
-                    .map(|c| ColumnMeta {
+
+        // Build per-column meta (name, type) and figure out which result
+        // columns map to classified base columns.
+        let (columns, redacted_column_lookup): (Vec<ColumnMeta>, Vec<Option<RedactionTarget>>) =
+            if let Some(first) = rows.first() {
+                let pg_cols = first.columns();
+                let mut metas = Vec::with_capacity(pg_cols.len());
+                let mut lookup = Vec::with_capacity(pg_cols.len());
+                for c in pg_cols.iter() {
+                    let pg_type = c.type_info().name().to_string();
+                    let mut redacted = false;
+                    let mut category = None;
+                    let mut target = None;
+                    if let Some(view) = &redactor_view {
+                        if let (Some(oid), Some(attnum)) =
+                            (c.relation_id(), c.relation_attribute_no())
+                        {
+                            let key = (oid.0 as i32, attnum);
+                            if let Some(cc) = view.by_oid.get(&key) {
+                                redacted = true;
+                                category = Some(cc.category);
+                                target = Some(RedactionTarget {
+                                    table_oid: key.0,
+                                    attnum: key.1,
+                                    column_name: cc.column_name.clone(),
+                                    pg_type: pg_type.clone(),
+                                });
+                            }
+                        }
+                    }
+                    metas.push(ColumnMeta {
                         name: c.name().to_string(),
-                        data_type: c.type_info().name().to_ascii_lowercase(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+                        data_type: pg_type.to_ascii_lowercase(),
+                        redacted,
+                        category,
+                    });
+                    lookup.push(target);
+                }
+                (metas, lookup)
+            } else {
+                (Vec::new(), Vec::new())
+            };
 
         let truncated = rows.len() > ROW_CAP;
         let take = rows.len().min(ROW_CAP);
 
         let mut out_rows: Vec<Vec<Option<String>>> = Vec::with_capacity(take);
+        let secret_ref = redactor_view.as_ref().map(|v| v.secret.clone());
         for row in rows.iter().take(take) {
             let mut out_row = Vec::with_capacity(row.columns().len());
             for (i, _col) in row.columns().iter().enumerate() {
-                out_row.push(decode_cell(row, i));
+                let raw = decode_cell(row, i);
+                let cooked = match (&raw, &redacted_column_lookup[i], &secret_ref) {
+                    (Some(real), Some(target), Some(secret)) => Some(fake_for(
+                        secret.as_ref(),
+                        target.table_oid,
+                        target.attnum,
+                        &target.column_name,
+                        &target.pg_type,
+                        real,
+                    )),
+                    _ => raw,
+                };
+                out_row.push(cooked);
             }
             out_rows.push(out_row);
         }
+
+        let redacted_names: Vec<String> = columns
+            .iter()
+            .filter(|c| c.redacted)
+            .map(|c| c.name.clone())
+            .collect();
+        let redaction_meta = if redacted_names.is_empty() {
+            None
+        } else {
+            Some(RedactionMeta {
+                note: format!(
+                    "{} column{} redacted by policy",
+                    redacted_names.len(),
+                    if redacted_names.len() == 1 { "" } else { "s" }
+                ),
+                redacted_columns: redacted_names,
+            })
+        };
+
         Ok::<_, anyhow::Error>(QueryResult {
             columns,
             rows: out_rows,
             row_count: rows.len(),
             truncated,
             elapsed_ms: started.elapsed().as_millis() as u64,
+            redaction_meta,
         })
     }
     .await;
