@@ -8,6 +8,7 @@ import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 import { PendingTray } from "./components/PendingTray";
 import { ReviewModal } from "./components/ReviewModal";
+import { SensitivityModal } from "./components/SensitivityModal";
 import { Splitter } from "./components/Splitter";
 import { ToastHost, showToast } from "./components/Toast";
 import { useResizable } from "./lib/useResizable";
@@ -22,6 +23,7 @@ export function App() {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
+  const [sensitivityFor, setSensitivityFor] = useState<string | null>(null);
 
   const rail = useResizable({
     storageKey: "db.layout.rail.width",
@@ -168,6 +170,36 @@ export function App() {
     tabs.openOrSwitchTable(schema, table);
   };
 
+  // ── Post-connect sensitivity toast ────────────────────────────
+  // Surfaces newly-suggested classifications so the user can review them.
+  // Idempotent on the backend: re-connecting an already-classified database
+  // returns new_pending: 0, which we suppress.
+  const onConnected = useCallback(
+    (name: string, outcome: { new_pending: number; total_classified: number } | null) => {
+      if (!outcome || outcome.new_pending === 0) return;
+      const n = outcome.new_pending;
+      showToast(
+        (
+          <span>
+            <span aria-hidden style={{ color: "var(--privacy)", marginRight: 6 }}>
+              ◌
+            </span>
+            <span className="mono">{n}</span> column{n === 1 ? "" : "s"} auto-classified
+            as sensitive on <span className="mono">{name}</span>
+          </span>
+        ),
+        "info",
+        {
+          action: {
+            label: "Review",
+            onClick: () => setSensitivityFor(name),
+          },
+        },
+      );
+    },
+    [],
+  );
+
   const onAgentOpen = (sql: string) => {
     tabs.addAgentTab(sql);
   };
@@ -193,6 +225,7 @@ export function App() {
           onSelect={setActiveName}
           onChanged={refresh}
           onAdd={() => setShowAdd(true)}
+          onConnected={onConnected}
         />
         <SchemaTree
           connectionName={active && active.connected ? active.name : null}
@@ -282,6 +315,19 @@ export function App() {
         <span>{connections.length} connection{connections.length === 1 ? "" : "s"}</span>
         <span>·</span>
         <span>{active ? (active.connected ? "connected" : "disconnected") : "no active connection"}</span>
+        {active?.connected && (
+          <>
+            <span>·</span>
+            <button
+              className="status-sens-button"
+              title="Review classifications (PHI / PCI / PII)"
+              onClick={() => setSensitivityFor(active.name)}
+            >
+              <span aria-hidden style={{ color: "var(--privacy)" }}>◌</span>
+              <span>sensitivity</span>
+            </button>
+          </>
+        )}
         {reveal && (
           <>
             <span>·</span>
@@ -303,6 +349,12 @@ export function App() {
         />
       )}
       {showMcp && <McpConfigModal onClose={() => setShowMcp(false)} />}
+      {sensitivityFor && (
+        <SensitivityModal
+          connection={sensitivityFor}
+          onClose={() => setSensitivityFor(null)}
+        />
+      )}
       <ToastHost />
     </div>
   );

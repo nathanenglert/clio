@@ -164,7 +164,8 @@ export const api = {
     invoke<Connection>("add_connection", { input }),
   delete_connection: (name: string) =>
     invoke<void>("delete_connection", { name }),
-  connect: (name: string) => invoke<void>("connect", { name }),
+  connect: (name: string) =>
+    invoke<ClassifyOutcome | null>("connect", { name }),
   disconnect: (name: string) => invoke<void>("disconnect", { name }),
   list_schemas: (connection: string) =>
     invoke<string[]>("list_schemas", { connection }),
