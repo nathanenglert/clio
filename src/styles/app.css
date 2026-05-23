@@ -576,15 +576,58 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   background: rgba(255, 240, 220, 0.012);
 }
 
-.grid thead th.sortable { cursor: pointer; user-select: none; }
-.grid thead th.sortable:hover { color: var(--text-primary); }
-.grid thead th.sortable.sorted { color: var(--text-primary); }
-.grid thead th.sortable.sorted .grid-col-name { color: var(--text-primary); }
-.sort-indicator {
+.grid thead th.col-header { cursor: pointer; user-select: none; }
+.grid thead th.col-header:hover .grid-col-name { color: var(--text-primary); }
+.grid thead th.col-header.sorted .grid-col-name { color: var(--text-primary); }
+.grid thead th.col-header.col-selected,
+.grid thead th.grid-rownum.corner-selected {
+  background: var(--op-read-soft);
+}
+.grid thead th.col-header.col-selected .grid-col-name { color: var(--text-primary); }
+
+/* Sort rail: always-visible chevron pair, click area is just the rail.
+   stopPropagation in the JSX means clicks here never reach the header. */
+.sort-rail {
   flex: 0 0 auto;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  height: 18px;
+  width: 14px;
+  margin-left: 4px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--line-faint);
+  border-radius: 0;
+  cursor: pointer;
+}
+.sort-rail:hover { background: rgba(255, 255, 255, 0.04); }
+.sort-chev {
+  display: block;
   font-size: 9px;
-  line-height: 1;
-  color: var(--text-primary);
+  line-height: 7px;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+.sort-rail:hover .sort-chev { color: var(--text-secondary); }
+.sort-chev.on { color: var(--text-primary); }
+.sort-rail.active { background: rgba(255, 255, 255, 0.03); }
+
+/* Corner cell: the row-number header — clicks select all, the rail toggles
+   the implicit "row order" sort. */
+.grid thead th.grid-rownum.corner { cursor: pointer; user-select: none; }
+.grid thead th.grid-rownum.corner .corner-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+}
+.grid thead th.grid-rownum.corner .sort-rail {
+  border-left: 0;
+  margin-left: 0;
 }
 
 .grid th.grid-rownum,
@@ -934,15 +977,48 @@ body.dragging-y * { cursor: inherit !important; }
   cursor: cell;
 }
 
-/* Dirty cell (staged edit) */
+/* Dirty cell (staged edit). The gold left-bar is drawn inline alongside any
+   selection-edge shadows — see cellBoxShadow() in ResultsGrid.tsx. */
 .grid td.dirty {
-  box-shadow: inset 2px 0 0 0 var(--op-write);
   color: var(--text-primary);
 }
 
-/* Selected row */
-.grid tbody tr.row-selected td:not(.grid-rownum) {
-  background: rgba(127, 168, 134, 0.06);
+/* Row gutter: clickable to select the row (skipped for deleted/add/ghost rows). */
+.grid tbody tr:not(.row-deleted):not(.row-add):not(.row-ghost) td.grid-rownum {
+  cursor: pointer;
+  user-select: none;
+}
+.grid tbody tr:not(.row-deleted):not(.row-add):not(.row-ghost) td.grid-rownum:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* Selected row: row-number gutter lights up. Data-cell tinting is handled
+   uniformly by .cell-selected below, so we don't paint cells from .row-selected. */
+.grid tbody tr.row-selected td.grid-rownum {
+  background: rgba(127, 168, 134, 0.20);
+  color: var(--text-primary);
+}
+.grid tbody tr.row-selected td.grid-rownum .row-num {
+  color: var(--text-primary);
+}
+
+/* Highlighted cell: every selected data cell shows the same green tint.
+   !important is required to beat higher-specificity overrides from the
+   zebra-stripe rule (.grid tbody tr:nth-child(even) td:not(.grid-rownum))
+   and the row-deleted background. The perimeter outline is drawn as an
+   inline box-shadow per cell — see cellEdges() / cellBoxShadow(). */
+.grid td.cell-selected:not(.grid-rownum) {
+  background: var(--op-read-soft) !important;
+}
+
+/* Select-all: corner + headers + row-gutter all light up. Per-cell tint
+   is already covered by .cell-selected since isCellHighlighted returns true. */
+.grid.all-selected thead th {
+  background: var(--op-read-soft);
+}
+.grid.all-selected tbody tr td.grid-rownum {
+  background: rgba(127, 168, 134, 0.20);
+  color: var(--text-primary);
 }
 
 /* Deleted row */
@@ -991,7 +1067,7 @@ body.dragging-y * { cursor: inherit !important; }
   font-style: italic;
 }
 
-/* Row gutter action button (delete ✗, undo ▲) */
+/* Row gutter action button (undo ▲ on deleted rows, cancel ✗ on add rows). */
 .row-action-btn {
   background: transparent;
   border: 0;
@@ -1004,19 +1080,7 @@ body.dragging-y * { cursor: inherit !important; }
 .row-action-btn:hover { color: var(--text-primary); }
 .row-action-btn.destruct { color: var(--op-destruct); }
 .row-action-btn.write { color: var(--op-write); }
-.row-action-btn.delete-hover {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  color: var(--op-destruct);
-}
-.grid tbody tr:hover .row-num { opacity: 0; }
-.grid tbody tr:hover .row-action-btn.delete-hover { opacity: 0.7; }
-.row-action-btn.delete-hover:hover { opacity: 1; }
-.row-num { font-variant-numeric: tabular-nums; transition: opacity 80ms ease; }
+.row-num { font-variant-numeric: tabular-nums; }
 
 /* Inline cell editor */
 .cell-editing {

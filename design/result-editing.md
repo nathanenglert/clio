@@ -122,9 +122,11 @@ Cells revert visually if undone. Original values are preserved on the staged bat
 
 **Triggers** (any of):
 
-- Select one or more rows (`Click`, `Shift+Click`, `⌘+Click`), then press `⌫` or `Del`.
+- Click row-number gutter to select (`Click`, `Shift+Click`, `⌘+Click`), then press `⌫` or `Del`.
 - Right-click → `Delete row(s)`.
-- Hover gutter → click the `▲` glyph that fades in.
+
+The row gutter is the dedicated selection target; no hover-revealed delete button.
+Selection is the only path to staging a delete, so the action is always deliberate.
 
 **Behavior:**
 
