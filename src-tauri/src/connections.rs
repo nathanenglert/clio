@@ -13,6 +13,87 @@ const KEYRING_SERVICE: &str = "com.dbapp.poc";
 /// keyring username field).
 const REDACTION_SECRET_PREFIX: &str = "redaction:";
 
+// ── Secret store ────────────────────────────────────────────────────
+//
+// Thin shim over the OS keyring. In debug builds, secrets live in a
+// plaintext JSON file under app_data_dir so dev iteration doesn't trip
+// the macOS keychain unlock prompt on every restart. Release builds
+// always use the real keyring.
+
+#[cfg(debug_assertions)]
+mod secret_store {
+    use super::app_data_dir;
+    use anyhow::{Context, Result};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn store_path() -> Result<PathBuf> {
+        Ok(app_data_dir()?.join("dev-secrets.json"))
+    }
+
+    fn load() -> Result<HashMap<String, String>> {
+        let path = store_path()?;
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+        let bytes = std::fs::read(&path).with_context(|| format!("read {:?}", path))?;
+        Ok(serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    fn save(map: &HashMap<String, String>) -> Result<()> {
+        let path = store_path()?;
+        let bytes = serde_json::to_vec_pretty(map)?;
+        std::fs::write(&path, bytes).with_context(|| format!("write {:?}", path))?;
+        Ok(())
+    }
+
+    pub fn get(_service: &str, entry: &str) -> Result<Option<String>> {
+        Ok(load()?.get(entry).cloned())
+    }
+
+    pub fn set(_service: &str, entry: &str, value: &str) -> Result<()> {
+        let mut map = load()?;
+        map.insert(entry.to_string(), value.to_string());
+        save(&map)
+    }
+
+    pub fn delete(_service: &str, entry: &str) -> Result<()> {
+        let mut map = load()?;
+        map.remove(entry);
+        save(&map)
+    }
+}
+
+#[cfg(not(debug_assertions))]
+mod secret_store {
+    use anyhow::{Context, Result};
+
+    pub fn get(service: &str, entry: &str) -> Result<Option<String>> {
+        let e = keyring::Entry::new(service, entry)
+            .with_context(|| format!("keyring entry for {entry}"))?;
+        match e.get_password() {
+            Ok(p) => Ok(Some(p)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(err) => Err(anyhow::anyhow!(err))
+                .with_context(|| format!("keyring read for {entry}")),
+        }
+    }
+
+    pub fn set(service: &str, entry: &str, value: &str) -> Result<()> {
+        keyring::Entry::new(service, entry)
+            .and_then(|e| e.set_password(value))
+            .with_context(|| format!("store keyring secret for {entry}"))
+    }
+
+    pub fn delete(service: &str, entry: &str) -> Result<()> {
+        if let Ok(e) = keyring::Entry::new(service, entry) {
+            // Missing entry is fine; ignore that specific error class.
+            let _ = e.delete_credential();
+        }
+        Ok(())
+    }
+}
+
 /// Resolves the app data directory; creates it if missing.
 pub fn app_data_dir() -> Result<PathBuf> {
     let base = dirs::data_local_dir().context("no local data dir")?;
@@ -142,9 +223,7 @@ pub async fn insert(pool: &SqlitePool, input: &NewConnectionInput) -> Result<Con
     .with_context(|| format!("insert connection {}", input.name))?;
 
     if !input.password.is_empty() {
-        keyring::Entry::new(KEYRING_SERVICE, &input.name)
-            .and_then(|e| e.set_password(&input.password))
-            .with_context(|| format!("store keyring secret for {}", input.name))?;
+        secret_store::set(KEYRING_SERVICE, &input.name, &input.password)?;
     }
 
     Ok(Connection {
@@ -164,10 +243,7 @@ pub async fn delete(pool: &SqlitePool, name: &str) -> Result<()> {
         .bind(name)
         .execute(pool)
         .await?;
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, name) {
-        // Missing entry is fine; ignore that specific error class.
-        let _ = entry.delete_credential();
-    }
+    let _ = secret_store::delete(KEYRING_SERVICE, name);
     let _ = delete_redaction_secret(name);
     Ok(())
 }
@@ -176,13 +252,7 @@ pub async fn delete(pool: &SqlitePool, name: &str) -> Result<()> {
 /// Passwordless connections (Teleport `tsh proxy db --tunnel`, trust auth,
 /// cert auth, IAM auth) are first-class — only true keyring failures error.
 pub fn get_password(name: &str) -> Result<Option<String>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, name)
-        .with_context(|| format!("keyring entry for {name}"))?;
-    match entry.get_password() {
-        Ok(p) => Ok(Some(p)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(anyhow::anyhow!(e)).with_context(|| format!("keyring read for {name}")),
-    }
+    secret_store::get(KEYRING_SERVICE, name)
 }
 
 // ── Sensitivity classifications ─────────────────────────────────────
@@ -344,47 +414,34 @@ pub fn ensure_redaction_secret(conn_name: &str) -> Result<()> {
     if get_redaction_secret(conn_name)?.is_some() {
         return Ok(());
     }
-    // 32 bytes of OS-RNG, hex-encoded for the keyring's string interface.
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    let entry = keyring::Entry::new(KEYRING_SERVICE, &redaction_secret_entry_name(conn_name))
-        .with_context(|| format!("keyring entry for redaction:{conn_name}"))?;
-    entry
-        .set_password(&hex)
-        .with_context(|| format!("store redaction secret for {conn_name}"))?;
-    Ok(())
+    secret_store::set(
+        KEYRING_SERVICE,
+        &redaction_secret_entry_name(conn_name),
+        &hex,
+    )
 }
 
 /// Read the secret as 32 raw bytes. `None` when no secret is stored yet.
 pub fn get_redaction_secret(conn_name: &str) -> Result<Option<[u8; 32]>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, &redaction_secret_entry_name(conn_name))
-        .with_context(|| format!("keyring entry for redaction:{conn_name}"))?;
-    match entry.get_password() {
-        Ok(hex) => {
-            if hex.len() != 64 {
-                anyhow::bail!("redaction secret for {conn_name} is not 32 bytes hex");
-            }
-            let mut out = [0u8; 32];
-            for i in 0..32 {
-                out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-                    .with_context(|| format!("decode redaction secret hex for {conn_name}"))?;
-            }
-            Ok(Some(out))
-        }
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => {
-            Err(anyhow::anyhow!(e)).with_context(|| format!("keyring read redaction:{conn_name}"))
-        }
+    let hex = match secret_store::get(KEYRING_SERVICE, &redaction_secret_entry_name(conn_name))? {
+        Some(h) => h,
+        None => return Ok(None),
+    };
+    if hex.len() != 64 {
+        anyhow::bail!("redaction secret for {conn_name} is not 32 bytes hex");
     }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .with_context(|| format!("decode redaction secret hex for {conn_name}"))?;
+    }
+    Ok(Some(out))
 }
 
 fn delete_redaction_secret(conn_name: &str) -> Result<()> {
-    if let Ok(entry) =
-        keyring::Entry::new(KEYRING_SERVICE, &redaction_secret_entry_name(conn_name))
-    {
-        let _ = entry.delete_credential();
-    }
-    Ok(())
+    secret_store::delete(KEYRING_SERVICE, &redaction_secret_entry_name(conn_name))
 }
