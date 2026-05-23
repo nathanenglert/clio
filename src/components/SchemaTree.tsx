@@ -19,6 +19,8 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
   const [columnsByTable, setColumnsByTable] = useState<Record<string, ColumnDescription[]>>({});
   const [focusedIdx, setFocusedIdx] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [loadingRoot, setLoadingRoot] = useState(false);
+  const [loadingNodes, setLoadingNodes] = useState<Record<string, boolean>>({});
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -29,11 +31,22 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
     setColumnsByTable({});
     setFocusedIdx(0);
     setError(null);
-    if (!connectionName) return;
+    setLoadingNodes({});
+    if (!connectionName) {
+      setLoadingRoot(false);
+      return;
+    }
+    setLoadingRoot(true);
     api
       .list_schemas(connectionName)
-      .then(setSchemas)
-      .catch((e) => setError(String(e)));
+      .then((ss) => {
+        setSchemas(ss);
+        setLoadingRoot(false);
+      })
+      .catch((e) => {
+        setError(String(e));
+        setLoadingRoot(false);
+      });
   }, [connectionName]);
 
   const flat: Node[] = useMemo(() => {
@@ -68,11 +81,18 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
     const next = !openSchemas[s];
     setOpenSchemas((m) => ({ ...m, [s]: next }));
     if (next && !tablesBySchema[s] && connectionName) {
+      const key = `s:${s}`;
+      setLoadingNodes((m) => ({ ...m, [key]: true }));
       try {
         const tables = await api.list_tables(connectionName, s);
         setTablesBySchema((m) => ({ ...m, [s]: tables }));
       } catch (e) {
         setError(String(e));
+      } finally {
+        setLoadingNodes((m) => {
+          const { [key]: _, ...rest } = m;
+          return rest;
+        });
       }
     }
   };
@@ -82,11 +102,18 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
     const next = !openTables[key];
     setOpenTables((m) => ({ ...m, [key]: next }));
     if (next && !columnsByTable[key] && connectionName) {
+      const lkey = `t:${key}`;
+      setLoadingNodes((m) => ({ ...m, [lkey]: true }));
       try {
         const cols = await api.describe_table(connectionName, s, t);
         setColumnsByTable((m) => ({ ...m, [key]: cols }));
       } catch (e) {
         setError(String(e));
+      } finally {
+        setLoadingNodes((m) => {
+          const { [lkey]: _, ...rest } = m;
+          return rest;
+        });
       }
     }
   };
@@ -119,7 +146,7 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
 
   if (!connectionName) {
     return (
-      <div className="tree" style={{ color: "var(--text-muted)", fontSize: "var(--fs-xs)", padding: 12 }}>
+      <div className="tree tree-hint">
         Connect to a database to browse schemas.
       </div>
     );
@@ -135,48 +162,61 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
       aria-label="Schema tree"
     >
       {error && (
-        <div style={{ color: "var(--op-destruct)", fontFamily: "var(--font-mono)", fontSize: "var(--fs-xs)", padding: 6 }}>
+        <div className="tree-error mono">
           {error}
         </div>
+      )}
+      {loadingRoot && schemas.length === 0 && !error && (
+        <div className="tree-hint mono">Loading schemas…</div>
       )}
       {flat.map((n, i) => {
         const focused = i === focusedIdx;
         const className = `tree-node ${focused ? "focused" : ""}`;
         if (n.kind === "schema") {
+          const sLoading = loadingNodes[`s:${n.schema}`];
           return (
-            <div
-              key={n.key}
-              className={className}
-              onClick={() => {
-                setFocusedIdx(i);
-                toggleSchema(n.schema);
-              }}
-              role="treeitem"
-              aria-expanded={!!openSchemas[n.schema]}
-            >
-              <span className="chev">{openSchemas[n.schema] ? "▾" : "▸"}</span>
-              <span className="icon">s</span>
-              <span className="label">{n.schema}</span>
+            <div key={n.key}>
+              <div
+                className={className}
+                onClick={() => {
+                  setFocusedIdx(i);
+                  toggleSchema(n.schema);
+                }}
+                role="treeitem"
+                aria-expanded={!!openSchemas[n.schema]}
+              >
+                <span className="chev">{openSchemas[n.schema] ? "▾" : "▸"}</span>
+                <span className="icon">s</span>
+                <span className="label">{n.schema}</span>
+              </div>
+              {sLoading && (
+                <div className="tree-loading mono" style={{ paddingLeft: 22 }}>loading…</div>
+              )}
             </div>
           );
         }
         if (n.kind === "table") {
+          const tLoading = loadingNodes[`t:${n.schema}.${n.table}`];
           return (
-            <div
-              key={n.key}
-              className={className}
-              style={{ paddingLeft: 22 }}
-              onClick={() => {
-                setFocusedIdx(i);
-                if (onPickTable) onPickTable(n.schema, n.table);
-                toggleTable(n.schema, n.table);
-              }}
-              role="treeitem"
-              aria-expanded={!!openTables[`${n.schema}.${n.table}`]}
-            >
-              <span className="chev">{openTables[`${n.schema}.${n.table}`] ? "▾" : "▸"}</span>
-              <span className="icon">t</span>
-              <span className="label">{n.table}</span>
+            <div key={n.key}>
+              <div
+                className={className}
+                style={{ paddingLeft: 22 }}
+                onClick={() => {
+                  setFocusedIdx(i);
+                  if (onPickTable) onPickTable(n.schema, n.table);
+                  toggleTable(n.schema, n.table);
+                }}
+                role="treeitem"
+                aria-expanded={!!openTables[`${n.schema}.${n.table}`]}
+              >
+                <span className="chev">{openTables[`${n.schema}.${n.table}`] ? "▾" : "▸"}</span>
+                <span className="icon">t</span>
+                <span className="label">{n.table}</span>
+              </div>
+              {tLoading && (
+                <div className="tree-loading mono" style={{ paddingLeft: 42 }}>loading…</div>
+              )}
             </div>
           );
         }

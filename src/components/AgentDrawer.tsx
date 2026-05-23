@@ -116,24 +116,6 @@ export function AgentDrawer({
         </div>
         <div style={{ flex: 1 }} />
         <button
-          aria-label="More"
-          title="More"
-          style={{
-            background: "transparent",
-            border: 0,
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            padding: 4,
-            display: "inline-flex",
-            alignItems: "center",
-            fontFamily: "var(--font-mono)",
-            fontSize: 14,
-            lineHeight: 1,
-          }}
-        >
-          ⋯
-        </button>
-        <button
           aria-label="Close"
           onClick={onCollapse}
           title="Collapse (Esc)"
