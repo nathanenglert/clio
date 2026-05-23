@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { ActivityEvent } from "../lib/api";
+import { useCopyFeedback } from "../lib/useCopyFeedback";
 import {
   AgentDot,
   fmtMonoTime,
@@ -123,15 +124,10 @@ function FocusPane({
   onOpenSql?: (sql: string) => void;
 }) {
   const querySql = lastQuery?.payload ?? lastQuery?.detail ?? null;
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const t = window.setTimeout(() => setCopied(false), 1200);
-    return () => window.clearTimeout(t);
-  }, [copied]);
+  const { copied, markCopied } = useCopyFeedback();
   const onCopy = () => {
     if (!querySql) return;
-    void navigator.clipboard.writeText(querySql).then(() => setCopied(true));
+    void navigator.clipboard.writeText(querySql).then(markCopied);
   };
   return (
     <div
@@ -322,18 +318,13 @@ function StreamRow({
   // POC is SELECT-only, so all events render with op-read tint
   const opColor = "var(--op-read)";
 
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const t = window.setTimeout(() => setCopied(false), 1200);
-    return () => window.clearTimeout(t);
-  }, [copied]);
+  const { copied, markCopied } = useCopyFeedback();
 
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   const onCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!sql) return;
-    void navigator.clipboard.writeText(sql).then(() => setCopied(true));
+    void navigator.clipboard.writeText(sql).then(markCopied);
   };
   const onOpen = (e: React.MouseEvent) => {
     e.stopPropagation();

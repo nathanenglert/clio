@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { ActivityEvent } from "../lib/api";
+import { useCopyFeedback } from "../lib/useCopyFeedback";
 import { fmtRelative, focusActionStyle } from "./agentShared";
 
 type HistoryViewProps = {
@@ -93,16 +94,11 @@ function HistoryRow({
 }) {
   const sql = event.payload ?? event.detail ?? null;
   const isAgent = event.source === "mcp";
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const t = window.setTimeout(() => setCopied(false), 1200);
-    return () => window.clearTimeout(t);
-  }, [copied]);
+  const { copied, markCopied } = useCopyFeedback();
 
   const onCopy = () => {
     if (!sql) return;
-    void navigator.clipboard.writeText(sql).then(() => setCopied(true));
+    void navigator.clipboard.writeText(sql).then(markCopied);
   };
 
   return (
