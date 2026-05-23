@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::time::Instant;
 
 use crate::connections;
-use crate::types::{Connection, NewConnectionInput};
+use crate::types::{ClassifyOutcome, Connection, NewConnectionInput};
 
 use super::Core;
 
@@ -39,7 +39,7 @@ pub async fn delete_connection(core: &Core, name: &str) -> Result<()> {
     r
 }
 
-pub async fn connect(core: &Core, name: &str) -> Result<()> {
+pub async fn connect(core: &Core, name: &str) -> Result<Option<ClassifyOutcome>> {
     let started = Instant::now();
     let r = async {
         let c = connections::get(&core.meta, name).await?;
@@ -47,9 +47,9 @@ pub async fn connect(core: &Core, name: &str) -> Result<()> {
         // Run the heuristic classifier synchronously. The privacy guarantee
         // ("MCP returns redacted data after connect") depends on this
         // completing before the connect call returns to the agent. Failures
-        // are surfaced but don't tear down the pool — see classify_schema.
-        let _ = super::sensitivity::classify_schema(core, name).await;
-        Ok::<_, anyhow::Error>(())
+        // are tolerated — the pool stays up; the UI just doesn't get a toast.
+        let outcome = super::sensitivity::classify_schema(core, name).await.ok();
+        Ok::<_, anyhow::Error>(outcome)
     }
     .await;
     core.record_ok("connect", name, started, &r);

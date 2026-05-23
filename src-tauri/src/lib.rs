@@ -35,7 +35,10 @@ async fn delete_connection(state: State<'_, Core>, name: String) -> Result<(), S
 }
 
 #[tauri::command]
-async fn connect(state: State<'_, Core>, name: String) -> Result<(), String> {
+async fn connect(
+    state: State<'_, Core>,
+    name: String,
+) -> Result<Option<ClassifyOutcome>, String> {
     core::connect(&state, &name).await.map_err(format_err)
 }
 

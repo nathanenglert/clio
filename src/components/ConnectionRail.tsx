@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Connection } from "../lib/api";
+import type { ClassifyOutcome, Connection } from "../lib/api";
 import { api } from "../lib/api";
 
 type Props = {
@@ -8,6 +8,9 @@ type Props = {
   onSelect: (name: string) => void;
   onChanged: () => void;
   onAdd: () => void;
+  /** Fires after a successful connect with the classification outcome. App
+   *  uses this to surface the "auto-classified" toast. */
+  onConnected?: (name: string, outcome: ClassifyOutcome | null) => void;
 };
 
 const CONFIRM_TIMEOUT_MS = 3000;
@@ -37,7 +40,8 @@ export function ConnectionRail(props: Props) {
       if (c.connected) {
         await api.disconnect(c.name);
       } else {
-        await api.connect(c.name);
+        const outcome = await api.connect(c.name);
+        props.onConnected?.(c.name, outcome);
       }
       props.onChanged();
       props.onSelect(c.name);
