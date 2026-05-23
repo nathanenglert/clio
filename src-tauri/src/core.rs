@@ -9,13 +9,18 @@ mod export;
 mod lifecycle;
 mod mutations;
 mod query;
+pub(crate) mod redactor;
 mod schema;
+mod sensitivity;
 
 pub use export::{export_query, write_file};
 pub use lifecycle::{add_connection, connect, delete_connection, disconnect, list_connections};
 pub use mutations::apply_mutations;
 pub use query::run_query;
 pub use schema::{describe_table, list_schemas, list_tables};
+pub use sensitivity::{classify_schema, list_classifications, update_classification};
+
+use redactor::RedactorCache;
 
 /// Container the UI- and MCP-mode entry points both hand to core fns.
 #[derive(Clone)]
@@ -24,6 +29,9 @@ pub struct Core {
     pub pools: PoolRegistry,
     pub emit: EmitFn,
     pub source: String, // "ui" | "mcp"
+    /// Lazy-built cache of `(table_oid, attnum) → Category` per connection.
+    /// Invalidated by `update_classification` and connection drop.
+    pub(crate) redactor_cache: RedactorCache,
 }
 
 impl Core {
