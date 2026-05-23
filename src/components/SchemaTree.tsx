@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type ColumnDescription } from "../lib/api";
+import {
+  api,
+  onActivity,
+  type Classification,
+  type ColumnDescription,
+} from "../lib/api";
 
 type Node =
   | { kind: "schema"; key: string; schema: string }
@@ -9,9 +14,38 @@ type Node =
 type Props = {
   connectionName: string | null;
   onPickTable?: (schema: string, table: string) => void;
+  /** Open the sensitivity review panel for this connection. Wired to the
+   *  privacy badge next to a table row. */
+  onReviewSensitivity?: (connection: string) => void;
 };
 
-export function SchemaTree({ connectionName, onPickTable }: Props) {
+type ClassIndex = {
+  byTable: Map<string, { count: number; pending: number }>;
+  byColumn: Map<string, Classification>;
+};
+
+const EMPTY_INDEX: ClassIndex = { byTable: new Map(), byColumn: new Map() };
+
+function buildClassIndex(rows: Classification[]): ClassIndex {
+  const byTable = new Map<string, { count: number; pending: number }>();
+  const byColumn = new Map<string, Classification>();
+  for (const r of rows) {
+    const tk = `${r.schema}.${r.table}`;
+    const ck = `${tk}.${r.column}`;
+    byColumn.set(ck, r);
+    const cur = byTable.get(tk) ?? { count: 0, pending: 0 };
+    cur.count += 1;
+    if (r.status === "pending") cur.pending += 1;
+    byTable.set(tk, cur);
+  }
+  return { byTable, byColumn };
+}
+
+export function SchemaTree({
+  connectionName,
+  onPickTable,
+  onReviewSensitivity,
+}: Props) {
   const [schemas, setSchemas] = useState<string[]>([]);
   const [openSchemas, setOpenSchemas] = useState<Record<string, boolean>>({});
   const [tablesBySchema, setTablesBySchema] = useState<Record<string, string[]>>({});
@@ -21,7 +55,39 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [loadingRoot, setLoadingRoot] = useState(false);
   const [loadingNodes, setLoadingNodes] = useState<Record<string, boolean>>({});
+  const [classIndex, setClassIndex] = useState<ClassIndex>(EMPTY_INDEX);
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Fetch classifications for the active connection. Refetched on connection
+  // change AND whenever an activity event signals that classifications may
+  // have changed (classify_schema or update_classification fired anywhere).
+  useEffect(() => {
+    if (!connectionName) {
+      setClassIndex(EMPTY_INDEX);
+      return;
+    }
+    let cancelled = false;
+    const load = () => {
+      api
+        .list_classifications(connectionName)
+        .then((rows) => {
+          if (!cancelled) setClassIndex(buildClassIndex(rows));
+        })
+        .catch(() => {
+          /* non-fatal — badges just won't render */
+        });
+    };
+    load();
+    const unlisten = onActivity((e) => {
+      if (e.tool === "classify_schema" || e.tool === "update_classification") {
+        load();
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlisten.then((u) => u()).catch(() => {});
+    };
+  }, [connectionName]);
 
   useEffect(() => {
     setSchemas([]);
@@ -197,6 +263,8 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
         }
         if (n.kind === "table") {
           const tLoading = loadingNodes[`t:${n.schema}.${n.table}`];
+          const tableKey = `${n.schema}.${n.table}`;
+          const privacy = classIndex.byTable.get(tableKey);
           return (
             <div key={n.key}>
               <div
@@ -213,6 +281,26 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
                 <span className="chev">{openTables[`${n.schema}.${n.table}`] ? "▾" : "▸"}</span>
                 <span className="icon">t</span>
                 <span className="label">{n.table}</span>
+                {privacy && (
+                  <button
+                    type="button"
+                    className={`tree-privacy-badge ${privacy.pending > 0 ? "pending" : ""}`}
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      if (onReviewSensitivity && connectionName)
+                        onReviewSensitivity(connectionName);
+                    }}
+                    title={`${privacy.count} sensitive column${privacy.count === 1 ? "" : "s"}${
+                      privacy.pending > 0 ? ` · ${privacy.pending} pending` : ""
+                    } — click to review`}
+                    aria-label={`Review ${privacy.count} sensitive column${
+                      privacy.count === 1 ? "" : "s"
+                    }`}
+                  >
+                    <span aria-hidden>◌</span>
+                    {privacy.count}
+                  </button>
+                )}
               </div>
               {tLoading && (
                 <div className="tree-loading mono" style={{ paddingLeft: 42 }}>loading…</div>
@@ -220,6 +308,8 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
             </div>
           );
         }
+        const colKey = `${n.schema}.${n.table}.${n.col.name}`;
+        const colPrivacy = classIndex.byColumn.get(colKey);
         return (
           <div
             key={n.key}
@@ -230,6 +320,15 @@ export function SchemaTree({ connectionName, onPickTable }: Props) {
           >
             <span className="chev"> </span>
             <span className="icon">{n.col.is_primary_key ? "#" : "·"}</span>
+            {colPrivacy && (
+              <span
+                className="tree-privacy-col-glyph"
+                title={`Redacted as ${colPrivacy.category.toUpperCase()} · ${colPrivacy.status}`}
+                aria-hidden
+              >
+                ◌
+              </span>
+            )}
             <span className="label">{n.col.name}</span>
             <span className="meta">
               {n.col.data_type}

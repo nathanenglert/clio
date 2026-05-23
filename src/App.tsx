@@ -230,6 +230,7 @@ export function App() {
         <SchemaTree
           connectionName={active && active.connected ? active.name : null}
           onPickTable={onPickTable}
+          onReviewSensitivity={setSensitivityFor}
         />
         <Splitter
           orientation="vertical"
