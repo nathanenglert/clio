@@ -36,6 +36,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
     "uuid",
     "json",
+    "bigdecimal",
 ] }
 
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }

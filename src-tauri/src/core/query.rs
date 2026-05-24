@@ -272,6 +272,7 @@ pub(super) fn decode_cell(row: &sqlx::postgres::PgRow, idx: usize) -> Option<Str
         "INT8" => try_decode!(i64),
         "FLOAT4" => try_decode!(f32),
         "FLOAT8" => try_decode!(f64),
+        "NUMERIC" => try_decode!(sqlx::types::BigDecimal),
         "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CHAR" | "CITEXT" => try_decode!(String),
         "UUID" => try_decode!(uuid::Uuid),
         "TIMESTAMP" => try_decode!(chrono::NaiveDateTime),
@@ -300,9 +301,32 @@ pub(super) fn decode_cell(row: &sqlx::postgres::PgRow, idx: usize) -> Option<Str
     }
     // User-defined enums and other text-shaped types: Postgres transmits the
     // label as UTF-8 bytes in both text and binary modes, so decode directly.
-    if let Ok(bytes) = raw.as_bytes() {
-        if let Ok(s) = std::str::from_utf8(bytes) {
-            return Some(s.to_string());
+    // Skip this for known binary-encoded types — their raw wire bytes can
+    // coincidentally form valid UTF-8 and produce silent garbage (see the
+    // NUMERIC bug fixed alongside this guard).
+    let known_binary = matches!(
+        type_name.as_str(),
+        "BOOL"
+            | "INT2"
+            | "INT4"
+            | "INT8"
+            | "FLOAT4"
+            | "FLOAT8"
+            | "NUMERIC"
+            | "UUID"
+            | "TIMESTAMP"
+            | "TIMESTAMPTZ"
+            | "DATE"
+            | "TIME"
+            | "JSON"
+            | "JSONB"
+            | "BYTEA"
+    );
+    if !known_binary {
+        if let Ok(bytes) = raw.as_bytes() {
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                return Some(s.to_string());
+            }
         }
     }
     Some(format!("<{type_name}>"))
