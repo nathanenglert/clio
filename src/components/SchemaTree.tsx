@@ -26,6 +26,9 @@ type Props = {
   /** Open the sensitivity review panel for this connection. Wired to the
    *  privacy badge next to a table row. */
   onReviewSensitivity?: (connection: string) => void;
+  /** Imperative hook: receives a fn the parent can call to pop open the
+   *  connections popover. Used by the command palette ("Manage connections"). */
+  openConnectionsRef?: React.MutableRefObject<(() => void) | null>;
 };
 
 const DELETE_CONFIRM_TIMEOUT_MS = 3000;
@@ -120,6 +123,7 @@ export function SchemaTree({
   onConnected,
   onPickTable,
   onReviewSensitivity,
+  openConnectionsRef,
 }: Props) {
   const connection = connections.find((c) => c.name === activeName) ?? null;
   const connectionName = connection && connection.connected ? connection.name : null;
@@ -164,6 +168,17 @@ export function SchemaTree({
       if (deleteTimer.current !== null) window.clearTimeout(deleteTimer.current);
     };
   }, []);
+
+  // Expose an imperative "open the connections popover" handle. The command
+  // palette wires this so "Manage connections" reuses the rail's existing
+  // popover rather than introducing a parallel surface.
+  useEffect(() => {
+    if (!openConnectionsRef) return;
+    openConnectionsRef.current = () => setPopoverOpen(true);
+    return () => {
+      openConnectionsRef.current = null;
+    };
+  }, [openConnectionsRef]);
 
   // Close popover on outside click or Escape.
   useEffect(() => {

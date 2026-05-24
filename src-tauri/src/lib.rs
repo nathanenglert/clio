@@ -172,12 +172,12 @@ async fn update_classification(
         .map_err(format_err)
 }
 
-/// Debug-only IPC: emit `reveal-sensitive` with the given boolean. Lets the
-/// dev test harness drive the toggle without touching the native menu. Also
-/// updates the menu item's checkmark so it stays in sync.
-#[cfg(debug_assertions)]
+/// Set the reveal-sensitive toggle state. Updates the View menu's checkmark
+/// and emits the `reveal-sensitive` event, mirroring what the native menu
+/// item does. Called from the command palette so the toggle is reachable
+/// without the menu accelerator.
 #[tauri::command]
-fn dev_toggle_reveal<R: Runtime>(app: tauri::AppHandle<R>, on: bool) -> Result<(), String> {
+fn set_reveal_sensitive<R: Runtime>(app: tauri::AppHandle<R>, on: bool) -> Result<(), String> {
     if let Some(check) = find_check_item(&app, REVEAL_MENU_ID) {
         check.set_checked(on).map_err(|e| e.to_string())?;
     }
@@ -480,8 +480,7 @@ pub fn run() {
             classify_schema,
             list_classifications,
             update_classification,
-            #[cfg(debug_assertions)]
-            dev_toggle_reveal,
+            set_reveal_sensitive,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
