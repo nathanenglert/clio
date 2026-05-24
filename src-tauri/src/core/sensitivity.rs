@@ -45,7 +45,6 @@ const HEURISTICS: &[Heuristic] = &[
     // PHI — health-specific. (Names/DOBs that COULD be PHI under HIPAA are
     // classified as PII here; the user can re-categorize in the review panel.)
     Heuristic { pattern: "mrn",        category: Category::Phi },
-    Heuristic { pattern: "patient_id", category: Category::Phi },
     Heuristic { pattern: "diagnosis",  category: Category::Phi },
     Heuristic { pattern: "icd",        category: Category::Phi },
     Heuristic { pattern: "npi",        category: Category::Phi },
