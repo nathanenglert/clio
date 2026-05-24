@@ -2083,3 +2083,247 @@ body.dragging-y * { cursor: inherit !important; }
   letter-spacing: 0.04em;
 }
 
+/* ── Results region (grid + JSON sidebar) ─────────────────────────── */
+
+.results-region {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* When the sidebar is present, the grid wraps still fills the leftover width. */
+.results-region > .grid-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Active-cell ring matching the inline cell-edit pattern but distinct (no glow). */
+.grid td.json-active {
+  background: var(--op-ddl-soft);
+  box-shadow: inset 0 0 0 1px var(--op-ddl) !important;
+}
+
+/* ── JSON sidebar ─────────────────────────────────────────────────── */
+
+.json-sidebar {
+  position: relative;
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.json-sidebar-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  left: -3px;
+  z-index: 3;
+}
+.json-sidebar-handle.splitter-v::after {
+  left: 50%;
+  right: auto;
+  margin-left: -0.5px;
+  width: 1px;
+}
+
+.json-sidebar-header {
+  height: 30px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+.json-sidebar-glyph {
+  color: var(--op-ddl);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: -0.04em;
+}
+.json-sidebar-col { color: var(--text-primary); }
+.json-sidebar-row { color: var(--text-faint); }
+.json-sidebar-close {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.json-sidebar-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+.json-breadcrumb {
+  padding: 4px 10px;
+  font-size: 10px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--line-faint);
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.json-breadcrumb-root {
+  color: var(--op-ddl);
+}
+.json-breadcrumb-sep {
+  color: var(--text-faint);
+  margin: 0 4px;
+}
+.json-breadcrumb-seg {
+  color: var(--text-secondary);
+}
+
+.json-dirty-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--op-write-soft);
+  border-bottom: 1px solid var(--op-write);
+  font-size: 10.5px;
+  color: var(--op-write);
+  flex: 0 0 auto;
+}
+.json-dirty-glyph { font-family: var(--font-mono); }
+.json-revert {
+  background: transparent;
+  border: 1px solid var(--op-write);
+  color: var(--op-write);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.json-revert:hover { background: var(--op-write); color: var(--bg-app); }
+
+.json-editor-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  padding: 0;
+  background: var(--bg-canvas);
+}
+.json-textarea {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  resize: none;
+  tab-size: 2;
+}
+/* Match the inline cell-editor agent border on focus, so view→edit feels
+   continuous with the rest of the editing surface. */
+.json-sidebar.editable .json-editor-body:focus-within {
+  box-shadow: inset 0 0 0 2px var(--agent-line);
+}
+.json-editor-body.invalid:focus-within {
+  box-shadow: inset 0 0 0 2px var(--op-destruct) !important;
+}
+
+.json-null-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  color: var(--text-faint);
+  font-style: italic;
+  font-size: 12px;
+}
+.json-null-clear {
+  background: transparent;
+  border: 1px solid var(--line-default);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-style: normal;
+}
+.json-null-clear:hover { border-color: var(--agent); color: var(--agent); }
+
+.json-sidebar-footer {
+  border-top: 1px solid var(--line-soft);
+  padding: 6px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 auto;
+  background: var(--bg-panel);
+}
+.json-validation {
+  font-size: 10.5px;
+}
+.json-validation.ok { color: var(--op-read); }
+.json-validation.err { color: var(--op-destruct); }
+.json-validation-pos { color: var(--text-faint); }
+
+.json-implied {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.json-sidebar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+.json-action {
+  background: transparent;
+  border: 1px solid var(--line-default);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.json-action:hover:not(:disabled) {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
+}
+.json-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.json-action.primary {
+  border-color: var(--op-write);
+  color: var(--op-write);
+}
+.json-action.primary:hover:not(:disabled) {
+  background: var(--op-write-soft);
+}
+.json-action .kbd {
+  font-size: 9.5px;
+  opacity: 0.85;
+}
+
+.json-readonly-hint {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
