@@ -12,7 +12,6 @@ import { Compartment, Prec } from "@codemirror/state";
 import {
   acceptCompletion,
   autocompletion,
-  snippetCompletion,
   startCompletion,
   type Completion,
   type CompletionContext,
@@ -34,6 +33,16 @@ type Props = {
   /** Called with (schema, table) when the user types `<ident>.` — lets the
    *  parent kick off a describe_table fetch so column completion can fill in. */
   onEnsureColumns?: (schema: string, table: string) => void;
+  /** User-managed snippet completions. Reference-stable from useSnippets. */
+  snippets?: readonly Completion[];
+  /** Imperatively focus + reveal the editor (used by save-as-snippet flow). */
+  registerHandle?: (api: SqlEditorHandle | null) => void;
+};
+
+export type SqlEditorHandle = {
+  /** Returns the currently selected text, or an empty string when none. */
+  getSelection: () => string;
+  focus: () => void;
 };
 
 /* Syntax colors mirror design/styles/tokens.css `.sql-*` rules. */
@@ -105,64 +114,22 @@ const theme = EditorView.theme(
   { dark: true },
 );
 
-// ── Snippets ──────────────────────────────────────────────────────
-// Kept tight — only patterns common enough that the autocomplete pop is
-// genuinely faster than typing. Cursor positions use $0 (final) and $1..$n
-// (tab stops). `boost` raises them above keyword matches so e.g. `sel` shows
-// the snippet ahead of bare `select`.
-const sqlSnippets: readonly Completion[] = [
-  snippetCompletion("select ${columns} from ${table}${}", {
-    label: "select … from",
-    detail: "snippet",
-    type: "keyword",
-    boost: 5,
-  }),
-  snippetCompletion("select * from ${table} where ${condition}${}", {
-    label: "select * from … where",
-    detail: "snippet",
-    type: "keyword",
-    boost: 4,
-  }),
-  snippetCompletion(
-    "select ${cols}\nfrom ${table_a} a\njoin ${table_b} b on a.${a_id} = b.${b_id}\nwhere ${condition}${}",
-    { label: "select … join", detail: "snippet", type: "keyword", boost: 3 },
-  ),
-  snippetCompletion("insert into ${table} (${cols})\nvalues (${vals})${}", {
-    label: "insert into …",
-    detail: "snippet",
-    type: "keyword",
-  }),
-  snippetCompletion("update ${table}\nset ${col} = ${val}\nwhere ${condition}${}", {
-    label: "update … set",
-    detail: "snippet",
-    type: "keyword",
-  }),
-  snippetCompletion("with ${cte} as (\n  ${query}\n)\nselect * from ${cte}${}", {
-    label: "with … as",
-    detail: "snippet",
-    type: "keyword",
-  }),
-  snippetCompletion("case when ${condition} then ${then} else ${else} end${}", {
-    label: "case when … else",
-    detail: "snippet",
-    type: "keyword",
-  }),
-];
-
-function snippetSource(context: CompletionContext) {
-  // Suppress snippets in `<ident>.` contexts — that's column-completion
-  // territory, and a snippet list there is just noise.
-  const before = context.matchBefore(/[\w".]+/);
-  if (before && /\.[\w"]*$/.test(before.text)) return null;
-  // Word before cursor — same heuristic the SQL keyword source uses. The
-  // autocomplete system filters our list against it.
-  const word = context.matchBefore(/\w+/);
-  if (!word && !context.explicit) return null;
-  if (word && word.from === word.to && !context.explicit) return null;
-  return {
-    from: word ? word.from : context.pos,
-    options: sqlSnippets,
-    validFor: /^\w*$/,
+// Snippet completion source — list is supplied by the parent (useSnippets).
+// Suppresses snippets in `<ident>.` contexts (those are column-completion
+// territory; a snippet list there is just noise).
+function makeSnippetSource(options: readonly Completion[]): CompletionSource {
+  return (context: CompletionContext) => {
+    if (options.length === 0) return null;
+    const before = context.matchBefore(/[\w".]+/);
+    if (before && /\.[\w"]*$/.test(before.text)) return null;
+    const word = context.matchBefore(/\w+/);
+    if (!word && !context.explicit) return null;
+    if (word && word.from === word.to && !context.explicit) return null;
+    return {
+      from: word ? word.from : context.pos,
+      options,
+      validFor: /^\w*$/,
+    };
   };
 }
 
@@ -200,6 +167,8 @@ function parseAliases(sql: string): Map<string, AliasTarget> {
   return map;
 }
 
+const EMPTY_SNIPPETS: readonly Completion[] = [];
+
 export function SqlEditor({
   value,
   onChange,
@@ -209,12 +178,17 @@ export function SqlEditor({
   schema,
   defaultSchema,
   onEnsureColumns,
+  snippets,
+  registerHandle,
 }: Props) {
   const ref = useRef<ReactCodeMirrorRef | null>(null);
   // One compartment per editor instance — lets us swap the sql() extension
   // (and therefore the schema-driven completion source) without rebuilding
   // the editor or losing undo history / selection.
   const sqlCompartment = useMemo(() => new Compartment(), []);
+  // Separate compartment for the snippets source so we can reconfigure it
+  // when the user adds / edits snippets without disturbing schema state.
+  const snippetCompartment = useMemo(() => new Compartment(), []);
 
   // Custom LanguageSupport so the keyword source can be scoped away from
   // property-access contexts. `sql()` always merges keywords with schema
@@ -249,9 +223,14 @@ export function SqlEditor({
         icons: true,
         closeOnBlur: true,
       }),
-      // SQL snippets, merged in via the language's data facet so they sit
-      // alongside the keyword + schema sources rather than replacing them.
-      PostgreSQL.language.data.of({ autocomplete: snippetSource }),
+      // User-managed snippets, merged in via the language's data facet so
+      // they sit alongside the keyword + schema sources. The compartment
+      // lets us swap the list when the user edits snippets.
+      snippetCompartment.of(
+        PostgreSQL.language.data.of({
+          autocomplete: makeSnippetSource(snippets ?? EMPTY_SNIPPETS),
+        }),
+      ),
       // After any transaction whose new text ends in `<ident>.`, kick off a
       // lazy column fetch and re-open completion. Listening on transactions
       // rather than `keyup` makes this work for keyboard input, paste,
@@ -323,10 +302,11 @@ export function SqlEditor({
           ]
         : []),
     ];
-    // schema/defaultSchema deliberately excluded — we react to those via the
-    // compartment reconfigure effect below so the extension list stays stable.
+    // schema/defaultSchema/snippets deliberately excluded — we react to those
+    // via the compartment reconfigure effects below so the extension list
+    // stays stable across re-renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onRun, sqlCompartment, onEnsureColumns]);
+  }, [onRun, sqlCompartment, snippetCompartment, onEnsureColumns]);
 
   // When the schema changes, reconfigure the SQL extension in place. This is
   // the load-bearing call for live intellisense: lazy describe_table results
@@ -339,6 +319,37 @@ export function SqlEditor({
       effects: sqlCompartment.reconfigure(buildSqlExtension(schema, defaultSchema)),
     });
   }, [schema, defaultSchema, sqlCompartment]);
+
+  // Snippets can mutate while the editor is open (user adds/edits in modal).
+  // Swap the snippet completion source without rebuilding the editor.
+  useEffect(() => {
+    const view = ref.current?.view;
+    if (!view) return;
+    view.dispatch({
+      effects: snippetCompartment.reconfigure(
+        PostgreSQL.language.data.of({
+          autocomplete: makeSnippetSource(snippets ?? EMPTY_SNIPPETS),
+        }),
+      ),
+    });
+  }, [snippets, snippetCompartment]);
+
+  // Expose a tiny imperative handle for save-as-snippet: reads the current
+  // selection and refocuses the editor. Kept narrow — anything bigger and we
+  // should reach for a context.
+  useEffect(() => {
+    if (!registerHandle) return;
+    registerHandle({
+      getSelection: () => {
+        const view = ref.current?.view;
+        if (!view) return "";
+        const { from, to } = view.state.selection.main;
+        return view.state.sliceDoc(from, to);
+      },
+      focus: () => ref.current?.view?.focus(),
+    });
+    return () => registerHandle(null);
+  }, [registerHandle]);
 
   return (
     <CodeMirror

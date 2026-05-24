@@ -14,6 +14,8 @@ import { useResizable } from "./lib/useResizable";
 import { useTabs } from "./lib/useTabs";
 import { useEditing } from "./lib/useEditing";
 import { useIntellisense } from "./lib/useIntellisense";
+import { useSnippets } from "./lib/useSnippets";
+import { SnippetsModal } from "./components/SnippetsModal";
 import { useReveal } from "./lib/useReveal";
 import { isEmpty as batchIsEmpty } from "./lib/editing";
 
@@ -65,6 +67,11 @@ export function App() {
   // Passing null when disconnected keeps the schema cache from racing the
   // connect → list_schemas sequence.
   const intellisense = useIntellisense(active?.connected ? activeName : null);
+  const snippets = useSnippets();
+  // Open state for the Snippets manager modal. `seedBody` is the initial body
+  // when summoned via the editor's "Save as snippet" action; null otherwise.
+  const [snippetsModalOpen, setSnippetsModalOpen] = useState(false);
+  const [snippetSeed, setSnippetSeed] = useState<string | null>(null);
   const [showReview, setShowReview] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
 
@@ -270,6 +277,11 @@ export function App() {
           editing={editing}
           reveal={reveal}
           intellisense={intellisense}
+          snippets={snippets}
+          onOpenSnippets={(seed) => {
+            setSnippetSeed(seed ?? null);
+            setSnippetsModalOpen(true);
+          }}
         />
       </div>
       <AgentSurface
@@ -352,6 +364,16 @@ export function App() {
         />
       )}
       {showMcp && <McpConfigModal onClose={() => setShowMcp(false)} />}
+      {snippetsModalOpen && (
+        <SnippetsModal
+          snippets={snippets}
+          seedBody={snippetSeed}
+          onClose={() => {
+            setSnippetsModalOpen(false);
+            setSnippetSeed(null);
+          }}
+        />
+      )}
       {sensitivityFor && (
         <SensitivityModal
           connection={sensitivityFor}

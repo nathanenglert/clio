@@ -186,6 +186,24 @@ fn dev_toggle_reveal<R: Runtime>(app: tauri::AppHandle<R>, on: bool) -> Result<(
 }
 
 #[tauri::command]
+async fn list_snippets(state: State<'_, Core>) -> Result<Vec<Snippet>, String> {
+    core::list_snippets(&state).await.map_err(format_err)
+}
+
+#[tauri::command]
+async fn upsert_snippet(
+    state: State<'_, Core>,
+    input: SnippetInput,
+) -> Result<Snippet, String> {
+    core::upsert_snippet(&state, input).await.map_err(format_err)
+}
+
+#[tauri::command]
+async fn delete_snippet(state: State<'_, Core>, id: String) -> Result<(), String> {
+    core::delete_snippet(&state, &id).await.map_err(format_err)
+}
+
+#[tauri::command]
 fn mcp_snippet() -> Result<McpSnippet, String> {
     let path = std::env::current_exe()
         .map_err(|e| e.to_string())?
@@ -456,6 +474,9 @@ pub fn run() {
             export_query,
             write_file,
             mcp_snippet,
+            list_snippets,
+            upsert_snippet,
+            delete_snippet,
             classify_schema,
             list_classifications,
             update_classification,
