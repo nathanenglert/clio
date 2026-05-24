@@ -10,6 +10,7 @@ import { useResizable } from "../lib/useResizable";
 import { getEdit } from "../lib/editing";
 import type { Tab } from "../lib/useTabs";
 import type { useEditing } from "../lib/useEditing";
+import type { Intellisense } from "../lib/useIntellisense";
 
 type Props = {
   active: Connection | null;
@@ -25,6 +26,8 @@ type Props = {
   editing: ReturnType<typeof useEditing>;
   /** Mirror of the View > Reveal sensitive data toggle. UI-only. */
   reveal: boolean;
+  /** Shared schema cache for SQL editor intellisense (App-owned). */
+  intellisense: Intellisense;
 };
 
 export function Workspace({
@@ -39,6 +42,7 @@ export function Workspace({
   onOpenMcpModal,
   editing,
   reveal,
+  intellisense,
 }: Props) {
   const editor = useResizable({
     storageKey: "db.layout.editor.height",
@@ -188,6 +192,9 @@ export function Workspace({
             value={activeTab.sql}
             onChange={(v) => onSqlChange(activeTab.id, v)}
             onRun={onRun}
+            schema={intellisense.schema}
+            defaultSchema={intellisense.defaultSchema}
+            onEnsureColumns={intellisense.ensureColumns}
           />
         )}
       </div>

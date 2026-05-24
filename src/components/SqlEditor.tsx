@@ -1,9 +1,25 @@
-import { useMemo } from "react";
-import CodeMirror, { EditorView, keymap, type ReactCodeMirrorProps } from "@uiw/react-codemirror";
-import { sql, PostgreSQL } from "@codemirror/lang-sql";
-import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { useEffect, useMemo, useRef } from "react";
+import CodeMirror, {
+  EditorView,
+  keymap,
+  type ReactCodeMirrorProps,
+  type ReactCodeMirrorRef,
+} from "@uiw/react-codemirror";
+import { PostgreSQL, keywordCompletionSource, schemaCompletionSource } from "@codemirror/lang-sql";
+import { HighlightStyle, LanguageSupport, syntaxHighlighting } from "@codemirror/language";
 import { undo, redo } from "@codemirror/commands";
+import { Compartment, Prec } from "@codemirror/state";
+import {
+  acceptCompletion,
+  autocompletion,
+  snippetCompletion,
+  startCompletion,
+  type Completion,
+  type CompletionContext,
+  type CompletionSource,
+} from "@codemirror/autocomplete";
 import { tags as t } from "@lezer/highlight";
+import type { IntellisenseSchema } from "../lib/useIntellisense";
 
 type Props = {
   value: string;
@@ -11,6 +27,13 @@ type Props = {
   onRun?: () => void;
   readOnly?: boolean;
   height?: string | number;
+  /** SQLNamespace-shaped schema; updates reconfigure the editor in place. */
+  schema?: IntellisenseSchema;
+  /** Set so unqualified tables (e.g. `users`) complete at the top level. */
+  defaultSchema?: string;
+  /** Called with (schema, table) when the user types `<ident>.` — lets the
+   *  parent kick off a describe_table fetch so column completion can fill in. */
+  onEnsureColumns?: (schema: string, table: string) => void;
 };
 
 /* Syntax colors mirror design/styles/tokens.css `.sql-*` rules. */
@@ -56,21 +79,218 @@ const theme = EditorView.theme(
       backgroundColor: "rgba(212, 145, 90, 0.18)",
     },
     ".cm-cursor": { borderLeftColor: "var(--text-primary)" },
+    // Completion popup — match the dark workbench surface.
+    ".cm-tooltip.cm-tooltip-autocomplete": {
+      backgroundColor: "var(--bg-panel, #1f1c18)",
+      border: "1px solid var(--border-subtle, rgba(255,255,255,0.08))",
+      borderRadius: "6px",
+      boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+      fontFamily: "var(--font-mono)",
+      fontSize: "12px",
+    },
+    ".cm-tooltip-autocomplete ul li": { padding: "3px 8px" },
+    ".cm-tooltip-autocomplete ul li[aria-selected]": {
+      backgroundColor: "rgba(212, 145, 90, 0.18)",
+      color: "var(--text-primary)",
+    },
+    ".cm-completionLabel": { color: "var(--text-primary)" },
+    ".cm-completionDetail": {
+      color: "var(--text-muted)",
+      fontStyle: "normal",
+      marginLeft: "8px",
+      fontSize: "11px",
+    },
+    ".cm-completionIcon": { opacity: 0.7, marginRight: "4px" },
   },
   { dark: true },
 );
 
-export function SqlEditor({ value, onChange, onRun, readOnly, height }: Props) {
+// ── Snippets ──────────────────────────────────────────────────────
+// Kept tight — only patterns common enough that the autocomplete pop is
+// genuinely faster than typing. Cursor positions use $0 (final) and $1..$n
+// (tab stops). `boost` raises them above keyword matches so e.g. `sel` shows
+// the snippet ahead of bare `select`.
+const sqlSnippets: readonly Completion[] = [
+  snippetCompletion("select ${columns} from ${table}${}", {
+    label: "select … from",
+    detail: "snippet",
+    type: "keyword",
+    boost: 5,
+  }),
+  snippetCompletion("select * from ${table} where ${condition}${}", {
+    label: "select * from … where",
+    detail: "snippet",
+    type: "keyword",
+    boost: 4,
+  }),
+  snippetCompletion(
+    "select ${cols}\nfrom ${table_a} a\njoin ${table_b} b on a.${a_id} = b.${b_id}\nwhere ${condition}${}",
+    { label: "select … join", detail: "snippet", type: "keyword", boost: 3 },
+  ),
+  snippetCompletion("insert into ${table} (${cols})\nvalues (${vals})${}", {
+    label: "insert into …",
+    detail: "snippet",
+    type: "keyword",
+  }),
+  snippetCompletion("update ${table}\nset ${col} = ${val}\nwhere ${condition}${}", {
+    label: "update … set",
+    detail: "snippet",
+    type: "keyword",
+  }),
+  snippetCompletion("with ${cte} as (\n  ${query}\n)\nselect * from ${cte}${}", {
+    label: "with … as",
+    detail: "snippet",
+    type: "keyword",
+  }),
+  snippetCompletion("case when ${condition} then ${then} else ${else} end${}", {
+    label: "case when … else",
+    detail: "snippet",
+    type: "keyword",
+  }),
+];
+
+function snippetSource(context: CompletionContext) {
+  // Suppress snippets in `<ident>.` contexts — that's column-completion
+  // territory, and a snippet list there is just noise.
+  const before = context.matchBefore(/[\w".]+/);
+  if (before && /\.[\w"]*$/.test(before.text)) return null;
+  // Word before cursor — same heuristic the SQL keyword source uses. The
+  // autocomplete system filters our list against it.
+  const word = context.matchBefore(/\w+/);
+  if (!word && !context.explicit) return null;
+  if (word && word.from === word.to && !context.explicit) return null;
+  return {
+    from: word ? word.from : context.pos,
+    options: sqlSnippets,
+    validFor: /^\w*$/,
+  };
+}
+
+// Match `<schema>.<table>.` or `<table>.` immediately before the cursor when
+// the user just typed a dot. Used to kick off lazy column fetches.
+const DOT_TRIGGER_RE = /(?:([a-zA-Z_][\w]*)\.)?([a-zA-Z_][\w]*)\.$/;
+
+// Sweep the editor's doc for `from <table> <alias>` / `join … <alias>` shapes
+// so we can resolve `u.` → `users` and prefetch the right table's columns.
+// The optional alias capture would happily swallow keywords like `where` if
+// unfiltered, so we post-filter against a small reserved-word set.
+const ALIAS_RE =
+  /\b(?:from|join)\s+(?:only\s+)?(?:"([^"]+)"|([a-z_][\w]*))(?:\s*\.\s*(?:"([^"]+)"|([a-z_][\w]*)))?(?:\s+(?:as\s+)?(?:"([^"]+)"|([a-z_][\w]*)))?/gi;
+
+const ALIAS_RESERVED = new Set([
+  "where", "on", "using", "left", "right", "inner", "outer", "full", "cross",
+  "join", "group", "order", "limit", "having", "as", "into", "union", "select",
+  "intersect", "except", "returning", "for", "with", "when", "then", "else",
+  "end", "and", "or", "not", "is", "null", "lateral", "fetch", "offset",
+  "window", "all", "distinct", "from", "set", "values", "natural",
+]);
+
+type AliasTarget = { schema: string; table: string };
+
+function parseAliases(sql: string): Map<string, AliasTarget> {
+  const map = new Map<string, AliasTarget>();
+  for (const m of sql.matchAll(ALIAS_RE)) {
+    const first = m[1] ?? m[2];
+    const second = m[3] ?? m[4];
+    const alias = (m[5] ?? m[6])?.toLowerCase();
+    if (!first || !alias) continue;
+    if (ALIAS_RESERVED.has(alias)) continue;
+    map.set(alias, second ? { schema: first, table: second } : { schema: "", table: first });
+  }
+  return map;
+}
+
+export function SqlEditor({
+  value,
+  onChange,
+  onRun,
+  readOnly,
+  height,
+  schema,
+  defaultSchema,
+  onEnsureColumns,
+}: Props) {
+  const ref = useRef<ReactCodeMirrorRef | null>(null);
+  // One compartment per editor instance — lets us swap the sql() extension
+  // (and therefore the schema-driven completion source) without rebuilding
+  // the editor or losing undo history / selection.
+  const sqlCompartment = useMemo(() => new Compartment(), []);
+
+  // Custom LanguageSupport so the keyword source can be scoped away from
+  // property-access contexts. `sql()` always merges keywords with schema
+  // results, which produces noisy popups when typing `users.cre` and seeing
+  // SQL `create` next to the `created_at` column.
+  const buildSqlExtension = (s?: IntellisenseSchema, ds?: string) => {
+    const baseKeywords = keywordCompletionSource(PostgreSQL, false);
+    const scopedKeywords: CompletionSource = (ctx) => {
+      // In `<ident>.<...>` property contexts, suppress keywords entirely.
+      if (ctx.matchBefore(/\.\w*$/)) return null;
+      return baseKeywords(ctx);
+    };
+    const schemaSrc = schemaCompletionSource({
+      dialect: PostgreSQL,
+      ...(s && Object.keys(s).length > 0 ? { schema: s } : {}),
+      ...(ds ? { defaultSchema: ds } : {}),
+    });
+    return new LanguageSupport(PostgreSQL.language, [
+      PostgreSQL.language.data.of({ autocomplete: schemaSrc }),
+      PostgreSQL.language.data.of({ autocomplete: scopedKeywords }),
+    ]);
+  };
+
   const extensions = useMemo<ReactCodeMirrorProps["extensions"]>(() => {
-    const exts = [
-      sql({ dialect: PostgreSQL, upperCaseKeywords: false }),
+    return [
+      sqlCompartment.of(buildSqlExtension(schema, defaultSchema)),
       syntaxHighlighting(highlight),
-      // In the Tauri webview, ⌘Z / ⌘⇧Z don't dispatch a keydown for the
-      // letter (the OS routes them through the Edit menu instead). They
-      // surface as `beforeinput` events with inputType "historyUndo" /
-      // "historyRedo", which CodeMirror's historyKeymap doesn't bind. We
-      // catch them here so undo works after paste — paste's preventDefault
-      // means WebKit's native undo manager has no record of the change.
+      autocompletion({
+        override: undefined, // keep the SQL source; we add ours alongside
+        activateOnTyping: true,
+        defaultKeymap: true,
+        icons: true,
+        closeOnBlur: true,
+      }),
+      // SQL snippets, merged in via the language's data facet so they sit
+      // alongside the keyword + schema sources rather than replacing them.
+      PostgreSQL.language.data.of({ autocomplete: snippetSource }),
+      // After any transaction whose new text ends in `<ident>.`, kick off a
+      // lazy column fetch and re-open completion. Listening on transactions
+      // rather than `keyup` makes this work for keyboard input, paste,
+      // execCommand, and IME alike — all of them go through dispatch.
+      EditorView.updateListener.of((update) => {
+        if (!update.docChanged) return;
+        let insertedDot = false;
+        update.changes.iterChanges((_fA, _tA, _fB, _tB, inserted) => {
+          if (inserted.length > 0 && inserted.toString().endsWith(".")) {
+            insertedDot = true;
+          }
+        });
+        if (!insertedDot) return;
+        const view = update.view;
+        const pos = view.state.selection.main.head;
+        const lineStart = view.state.doc.lineAt(pos).from;
+        const upToCursor = view.state.sliceDoc(lineStart, pos);
+        const m = DOT_TRIGGER_RE.exec(upToCursor);
+        if (m && onEnsureColumns) {
+          const [, maybeSchema, ident] = m;
+          if (maybeSchema) {
+            onEnsureColumns(maybeSchema, ident);
+          } else {
+            // Unqualified `<ident>.` — might be a table in the default schema,
+            // or an alias declared elsewhere in the doc. Scan for aliases
+            // first so `u.` after `from users u` prefetches `users`, not `u`.
+            const alias = parseAliases(view.state.doc.toString()).get(ident.toLowerCase());
+            if (alias) {
+              onEnsureColumns(alias.schema || defaultSchema || "", alias.table);
+            } else if (defaultSchema) {
+              onEnsureColumns(defaultSchema, ident);
+            }
+          }
+        }
+        // Defer the completion-start: the same updateListener tick is mid-
+        // transaction; opening completion synchronously from here re-enters
+        // dispatch, which the autocomplete extension dislikes.
+        queueMicrotask(() => startCompletion(view));
+      }),
       EditorView.domEventHandlers({
         beforeinput(event, view) {
           if (event.inputType === "historyUndo") {
@@ -84,26 +304,45 @@ export function SqlEditor({ value, onChange, onRun, readOnly, height }: Props) {
           return false;
         },
       }),
+      // Tab accepts the highlighted completion when the popup is open;
+      // otherwise acceptCompletion returns false and Tab falls through to
+      // the default indent behavior. Boosted to outrun basicSetup's Tab.
+      Prec.high(keymap.of([{ key: "Tab", run: acceptCompletion }])),
+      ...(onRun
+        ? [
+            keymap.of([
+              {
+                key: "Mod-Enter",
+                preventDefault: true,
+                run: () => {
+                  onRun();
+                  return true;
+                },
+              },
+            ]),
+          ]
+        : []),
     ];
-    if (onRun) {
-      exts.push(
-        keymap.of([
-          {
-            key: "Mod-Enter",
-            preventDefault: true,
-            run: () => {
-              onRun();
-              return true;
-            },
-          },
-        ]),
-      );
-    }
-    return exts;
-  }, [onRun]);
+    // schema/defaultSchema deliberately excluded — we react to those via the
+    // compartment reconfigure effect below so the extension list stays stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onRun, sqlCompartment, onEnsureColumns]);
+
+  // When the schema changes, reconfigure the SQL extension in place. This is
+  // the load-bearing call for live intellisense: lazy describe_table results
+  // arrive after the editor has already mounted, and this is what makes the
+  // new column list show up in the next completion query.
+  useEffect(() => {
+    const view = ref.current?.view;
+    if (!view) return;
+    view.dispatch({
+      effects: sqlCompartment.reconfigure(buildSqlExtension(schema, defaultSchema)),
+    });
+  }, [schema, defaultSchema, sqlCompartment]);
 
   return (
     <CodeMirror
+      ref={ref}
       value={value}
       onChange={onChange}
       extensions={extensions}
@@ -115,7 +354,9 @@ export function SqlEditor({ value, onChange, onRun, readOnly, height }: Props) {
         highlightActiveLine: false,
         highlightActiveLineGutter: false,
         foldGutter: false,
-        autocompletion: true,
+        // `autocompletion: false` here — we wire it up explicitly above so we
+        // can layer in snippets + our own configuration.
+        autocompletion: false,
         bracketMatching: true,
         closeBrackets: true,
         indentOnInput: true,

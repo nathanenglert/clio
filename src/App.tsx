@@ -13,6 +13,7 @@ import { ToastHost, showToast } from "./components/Toast";
 import { useResizable } from "./lib/useResizable";
 import { useTabs } from "./lib/useTabs";
 import { useEditing } from "./lib/useEditing";
+import { useIntellisense } from "./lib/useIntellisense";
 import { useReveal } from "./lib/useReveal";
 import { isEmpty as batchIsEmpty } from "./lib/editing";
 
@@ -60,6 +61,10 @@ export function App() {
   const reveal = useReveal();
   const tabs = useTabs(activeName);
   const editing = useEditing(activeName);
+  // The connection is only useful for completion once it's actually connected.
+  // Passing null when disconnected keeps the schema cache from racing the
+  // connect → list_schemas sequence.
+  const intellisense = useIntellisense(active?.connected ? activeName : null);
   const [showReview, setShowReview] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
 
@@ -264,6 +269,7 @@ export function App() {
           onOpenMcpModal={() => setShowMcp(true)}
           editing={editing}
           reveal={reveal}
+          intellisense={intellisense}
         />
       </div>
       <AgentSurface
