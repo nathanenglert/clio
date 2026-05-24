@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { api, onActivity, type ActivityEvent, type Connection } from "./lib/api";
-import { ConnectionRail } from "./components/ConnectionRail";
 import { SchemaTree } from "./components/SchemaTree";
 import { Workspace } from "./components/Workspace";
 import { AgentSurface } from "./components/AgentSurface";
@@ -219,16 +218,13 @@ export function App() {
         Clio
       </div>
       <div className="rail">
-        <ConnectionRail
+        <SchemaTree
           connections={connections}
           activeName={activeName}
           onSelect={setActiveName}
           onChanged={refresh}
           onAdd={() => setShowAdd(true)}
           onConnected={onConnected}
-        />
-        <SchemaTree
-          connectionName={active && active.connected ? active.name : null}
           onPickTable={onPickTable}
           onReviewSensitivity={setSensitivityFor}
         />

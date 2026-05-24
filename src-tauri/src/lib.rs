@@ -53,8 +53,24 @@ async fn list_schemas(state: State<'_, Core>, connection: String) -> Result<Vec<
 }
 
 #[tauri::command]
-async fn list_tables(state: State<'_, Core>, connection: String, schema: String) -> Result<Vec<String>, String> {
+async fn list_tables(
+    state: State<'_, Core>,
+    connection: String,
+    schema: String,
+) -> Result<Vec<TableSummary>, String> {
     core::list_tables(&state, &connection, &schema)
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
+async fn search_columns(
+    state: State<'_, Core>,
+    connection: String,
+    query: String,
+    limit: Option<i64>,
+) -> Result<Vec<ColumnSearchHit>, String> {
+    core::search_columns(&state, &connection, &query, limit.unwrap_or(50))
         .await
         .map_err(format_err)
 }
@@ -433,6 +449,7 @@ pub fn run() {
             disconnect,
             list_schemas,
             list_tables,
+            search_columns,
             describe_table,
             run_query,
             apply_mutations,

@@ -89,7 +89,7 @@ impl McpServer {
         ok_json(r)
     }
 
-    #[tool(description = "List tables and views in the given schema.")]
+    #[tool(description = "List tables/views/matviews in the given schema. Returns objects with `name`, `kind` (table|view|matview|partitioned|foreign), and `row_estimate` (planner estimate from pg_class.reltuples; omitted if never analyzed).")]
     async fn list_tables(
         &self,
         Parameters(SchemaArg { connection, schema }): Parameters<SchemaArg>,

@@ -17,7 +17,7 @@ pub use export::{export_query, write_file};
 pub use lifecycle::{add_connection, connect, delete_connection, disconnect, list_connections};
 pub use mutations::apply_mutations;
 pub use query::run_query;
-pub use schema::{describe_table, list_schemas, list_tables};
+pub use schema::{describe_table, list_schemas, list_tables, search_columns};
 pub use sensitivity::{classify_schema, list_classifications, update_classification};
 
 use redactor::RedactorCache;

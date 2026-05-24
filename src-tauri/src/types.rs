@@ -28,6 +28,51 @@ pub struct NewConnectionInput {
     pub ssl_mode: String,
 }
 
+/// Lightweight per-table summary returned by `list_tables`.
+///
+/// `kind` distinguishes ordinary tables from views/matviews/etc. so the rail
+/// can show a different glyph (per design/screenshots/08).
+/// `row_estimate` comes from `pg_class.reltuples` — fast, slightly stale, and
+/// `None` for relations the planner has never analyzed (e.g. fresh views).
+#[derive(Debug, Clone, Serialize)]
+pub struct TableSummary {
+    pub name: String,
+    pub kind: TableKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_estimate: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TableKind {
+    Table,
+    View,
+    MatView,
+    Partitioned,
+    Foreign,
+}
+
+impl TableKind {
+    pub fn from_relkind(c: char) -> Self {
+        match c {
+            'v' => TableKind::View,
+            'm' => TableKind::MatView,
+            'p' => TableKind::Partitioned,
+            'f' => TableKind::Foreign,
+            _ => TableKind::Table,
+        }
+    }
+}
+
+/// Hit from the column search command — used to power the COLUMNS section of
+/// the schema rail's filter UI (design/screenshots/10).
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnSearchHit {
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ColumnDescription {
     pub name: String,
