@@ -25,6 +25,21 @@ export type ColumnDescription = Column & {
   enum_values?: string[];
 };
 
+export type TableKind = "table" | "view" | "matview" | "partitioned" | "foreign";
+
+export type TableSummary = {
+  name: string;
+  kind: TableKind;
+  /** Planner estimate from pg_class.reltuples; absent if never analyzed. */
+  row_estimate?: number;
+};
+
+export type ColumnSearchHit = {
+  schema: string;
+  table: string;
+  column: string;
+};
+
 export type Category = "phi" | "pci" | "pii";
 
 export type ColumnMeta = {
@@ -170,7 +185,9 @@ export const api = {
   list_schemas: (connection: string) =>
     invoke<string[]>("list_schemas", { connection }),
   list_tables: (connection: string, schema: string) =>
-    invoke<string[]>("list_tables", { connection, schema }),
+    invoke<TableSummary[]>("list_tables", { connection, schema }),
+  search_columns: (connection: string, query: string, limit = 50) =>
+    invoke<ColumnSearchHit[]>("search_columns", { connection, query, limit }),
   describe_table: (connection: string, schema: string, table: string) =>
     invoke<ColumnDescription[]>("describe_table", {
       connection,
