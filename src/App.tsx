@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { api, onActivity, type ActivityEvent, type Connection } from "./lib/api";
 import { SchemaTree } from "./components/SchemaTree";
 import { Workspace } from "./components/Workspace";
@@ -16,6 +17,7 @@ import { useEditing } from "./lib/useEditing";
 import { useIntellisense } from "./lib/useIntellisense";
 import { useSnippets } from "./lib/useSnippets";
 import { SnippetsModal } from "./components/SnippetsModal";
+import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 import { useReveal } from "./lib/useReveal";
 import { isEmpty as batchIsEmpty } from "./lib/editing";
 
@@ -74,6 +76,8 @@ export function App() {
   const [snippetSeed, setSnippetSeed] = useState<string | null>(null);
   const [showReview, setShowReview] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const openConnectionsRef = useRef<(() => void) | null>(null);
 
   // The agent dock should only show the agent's work; user-initiated activity
   // is surfaced separately (History tab). See design/README.md §"Agent activity
@@ -177,6 +181,91 @@ export function App() {
     return () => document.removeEventListener("keydown", onKey);
   }, [hasTrayWork, editing.busy, doCommit]);
 
+  // ⌘K opens the command palette. Toggles closed on a second press so users
+  // can dismiss without reaching for Esc. See design/README.md §"Command palette".
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Commands shown in the palette. Each item is "current state" — for
+  // example, "Reveal sensitive data" flips its title based on `reveal`. We
+  // memoize per dep so the palette doesn't rebuild on every keystroke.
+  const paletteCommands = useMemo<CommandItem[]>(() => {
+    const items: CommandItem[] = [
+      {
+        id: "new-tab",
+        title: "New query tab",
+        onSelect: () => {
+          tabs.addScratchTab();
+        },
+      },
+      {
+        id: "toggle-reveal",
+        title: reveal ? "Hide sensitive data" : "Reveal sensitive data",
+        subtitle: "UI only — MCP responses stay redacted",
+        kbd: "⌘⌥R",
+        onSelect: () => {
+          void invoke("set_reveal_sensitive", { on: !reveal });
+        },
+      },
+      {
+        id: "manage-connections",
+        title: "Manage connections",
+        onSelect: () => openConnectionsRef.current?.(),
+      },
+      {
+        id: "add-connection",
+        title: "Add connection…",
+        onSelect: () => setShowAdd(true),
+      },
+      {
+        id: "manage-snippets",
+        title: "Manage snippets…",
+        onSelect: () => {
+          setSnippetSeed(null);
+          setSnippetsModalOpen(true);
+        },
+      },
+      {
+        id: "mcp-config",
+        title: "MCP config…",
+        subtitle: "Connect this workbench to an AI agent",
+        onSelect: () => setShowMcp(true),
+      },
+    ];
+    if (active?.connected) {
+      items.push({
+        id: "review-sensitivity",
+        title: "Review sensitivity classifications…",
+        subtitle: active.name,
+        onSelect: () => setSensitivityFor(active.name),
+      });
+    }
+    return items;
+  }, [reveal, tabs, active?.connected, active?.name]);
+
+  // Open a recent query in a new tab. Agent-authored queries land in an
+  // agent-marked tab; user-authored go into a fresh scratch tab so the
+  // authorship signal in the tab strip stays honest.
+  const onPaletteOpenSql = useCallback(
+    (sql: string, source: "ui" | "mcp") => {
+      if (source === "mcp") {
+        tabs.addAgentTab(sql);
+      } else {
+        const id = tabs.addScratchTab();
+        if (id) tabs.setSql(id, sql);
+      }
+    },
+    [tabs],
+  );
+
   const onPickTable = (schema: string, table: string) => {
     tabs.openOrSwitchTable(schema, table);
   };
@@ -239,6 +328,7 @@ export function App() {
           onConnected={onConnected}
           onPickTable={onPickTable}
           onReviewSensitivity={setSensitivityFor}
+          openConnectionsRef={openConnectionsRef}
         />
         <Splitter
           orientation="vertical"
@@ -378,6 +468,16 @@ export function App() {
         <SensitivityModal
           connection={sensitivityFor}
           onClose={() => setSensitivityFor(null)}
+        />
+      )}
+      {paletteOpen && (
+        <CommandPalette
+          onClose={() => setPaletteOpen(false)}
+          connection={active}
+          recentQueries={recentQueries}
+          commands={paletteCommands}
+          onPickTable={onPickTable}
+          onOpenSql={onPaletteOpenSql}
         />
       )}
       <ToastHost />
