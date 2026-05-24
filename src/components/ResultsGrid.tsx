@@ -35,7 +35,10 @@ type Props = {
   batch: PendingBatch;
   // Drafts for active in-progress add rows (pre-staged).
   activeAdds: ActiveAdd[];
+  /** Currently-open JSON sidebar target, or null. Drives the active-cell ring. */
+  jsonOpenAt: { rowIdx: number; col: string } | null;
   // Callbacks
+  onOpenJson: (rowIdx: number, col: string) => void;
   onStageEdit: (rowIdx: number, col: string, newValue: string | null) => void;
   onStageDelete: (rowIdx: number) => void;
   onUndoDelete: (rowIdx: number) => void;
@@ -64,6 +67,8 @@ export function ResultsGrid(props: Props) {
     columnsMeta,
     batch,
     activeAdds,
+    jsonOpenAt,
+    onOpenJson,
     onStageEdit,
     onStageDelete,
     onUndoDelete,
@@ -262,7 +267,12 @@ export function ResultsGrid(props: Props) {
       if (dr && !isDeleted(batch, dr.origIdx)) {
         e.preventDefault();
         const col = result.columns[sel.c1];
-        setEditing({ kind: "row", rowIdx: dr.origIdx, col: col.name });
+        const isJson = col.data_type === "jsonb" || col.data_type === "json";
+        if (isJson) {
+          onOpenJson(dr.origIdx, col.name);
+        } else {
+          setEditing({ kind: "row", rowIdx: dr.origIdx, col: col.name });
+        }
       }
       return;
     }
@@ -433,6 +443,8 @@ export function ResultsGrid(props: Props) {
                   const isJson = col.data_type === "jsonb" || col.data_type === "json";
                   const isNull = displayValue === null;
                   const highlighted = isCellHighlighted(sel, displayRow, ci, ri, col.name);
+                  const jsonActive =
+                    isJson && jsonOpenAt?.rowIdx === ri && jsonOpenAt?.col === col.name;
                   const edges = cellEdges(sel, displayRow, ci, ri, col.name, result, displayRows);
                   const boxShadow = cellBoxShadow(edges, dirty);
                   const cls = [
@@ -440,12 +452,16 @@ export function ResultsGrid(props: Props) {
                     isJson ? "json" : "",
                     dirty ? "dirty" : "",
                     highlighted ? "cell-selected" : "",
+                    jsonActive ? "json-active" : "",
                   ]
                     .filter(Boolean)
                     .join(" ");
+                  // jsonb cells never use the inline editor — they route to the
+                  // sidebar (design/result-editing.md §"Type-aware editors").
                   const isEditing =
                     editable &&
                     !deleted &&
+                    !isJson &&
                     editing?.kind === "row" &&
                     editing.rowIdx === ri &&
                     editing.col === col.name;
@@ -474,15 +490,24 @@ export function ResultsGrid(props: Props) {
                       style={boxShadow ? { boxShadow } : undefined}
                       onClick={deleted ? undefined : (e) => clickCell(displayRow, ci, e)}
                       onDoubleClick={() => {
-                        if (!editable || deleted || colLocked) return;
+                        if (deleted) return;
+                        if (isJson) {
+                          // JSON cells route to the sidebar even on read-only
+                          // results — opens in pretty-viewer mode.
+                          if (!colLocked) onOpenJson(ri, col.name);
+                          return;
+                        }
+                        if (!editable || colLocked) return;
                         setEditing({ kind: "row", rowIdx: ri, col: col.name });
                       }}
                       title={
                         colLocked
                           ? "Redacted column — toggle View > Reveal sensitive data to edit"
-                          : editable && !deleted
-                            ? "Double-click to edit"
-                            : undefined
+                          : isJson
+                            ? "Double-click to open JSON sidebar"
+                            : editable && !deleted
+                              ? "Double-click to edit"
+                              : undefined
                       }
                     >
                       {isNull ? "null" : displayValue}
