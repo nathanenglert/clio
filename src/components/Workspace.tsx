@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { type Connection } from "../lib/api";
 import { Splitter } from "./Splitter";
 import { TabBar } from "./TabBar";
-import { SqlEditor } from "./SqlEditor";
+import { SqlEditor, type SqlEditorHandle } from "./SqlEditor";
 import { ExportMenu } from "./ExportMenu";
 import { ResultsGrid } from "./ResultsGrid";
 import { JsonSidebar, type JsonSidebarTarget } from "./JsonSidebar";
@@ -11,6 +11,7 @@ import { getEdit } from "../lib/editing";
 import type { Tab } from "../lib/useTabs";
 import type { useEditing } from "../lib/useEditing";
 import type { Intellisense } from "../lib/useIntellisense";
+import type { Snippets } from "../lib/useSnippets";
 
 type Props = {
   active: Connection | null;
@@ -28,6 +29,11 @@ type Props = {
   reveal: boolean;
   /** Shared schema cache for SQL editor intellisense (App-owned). */
   intellisense: Intellisense;
+  /** App-owned snippet store + completions. */
+  snippets: Snippets;
+  /** Open the Snippets management modal. Pass an initial body to prefill
+   *  (used by "Save selection as snippet"). */
+  onOpenSnippets: (seedBody?: string) => void;
 };
 
 export function Workspace({
@@ -43,7 +49,13 @@ export function Workspace({
   editing,
   reveal,
   intellisense,
+  snippets,
+  onOpenSnippets,
 }: Props) {
+  // Imperative handle to the SqlEditor — lets the toolbar's "Save as snippet"
+  // capture the current selection (or full body when no selection) without
+  // re-routing every keystroke through App state.
+  const editorRef = useRef<SqlEditorHandle | null>(null);
   const editor = useResizable({
     storageKey: "db.layout.editor.height",
     defaultSize: 220,
@@ -170,6 +182,18 @@ export function Workspace({
         <button className="editor-btn soon" disabled title="EXPLAIN — coming soon">
           EXPLAIN
         </button>
+        <button
+          className="editor-btn"
+          onClick={() => {
+            const sel = editorRef.current?.getSelection() ?? "";
+            const seed = sel.trim().length > 0 ? sel : undefined;
+            onOpenSnippets(seed);
+          }}
+          title="Manage snippets — opens with the editor selection prefilled, or empty to browse"
+        >
+          <span className="editor-btn-icon" aria-hidden>{"{·}"}</span>
+          Snippets
+        </button>
         <div className="spacer" />
         {isAgentTab && (
           <span className="agent-badge">
@@ -195,6 +219,10 @@ export function Workspace({
             schema={intellisense.schema}
             defaultSchema={intellisense.defaultSchema}
             onEnsureColumns={intellisense.ensureColumns}
+            snippets={snippets.completions}
+            registerHandle={(h) => {
+              editorRef.current = h;
+            }}
           />
         )}
       </div>

@@ -223,6 +223,36 @@ impl ActivityEvent {
     }
 }
 
+// ── SQL snippets ─────────────────────────────────────────────────
+//
+// User-managed templates surfaced in the editor's autocomplete. `prefix` is
+// the trigger label users type to summon the snippet (e.g. `sfw` → select
+// * from … where). `body` may contain ${name} tab stops in CodeMirror's
+// snippet syntax. Storage lives in the metadata SQLite; see connections.rs.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snippet {
+    pub id: String,
+    pub name: String,
+    pub prefix: String,
+    pub body: String,
+    pub description: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SnippetInput {
+    /// Empty / absent on insert; the existing id when updating.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub prefix: String,
+    pub body: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct McpTarget {
     pub key: String,

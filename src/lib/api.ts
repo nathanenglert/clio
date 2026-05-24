@@ -123,6 +123,28 @@ export type MutationOutcome = {
   error_at: number | null;
 };
 
+// ── Snippets (SQL editor templates) ──────────────────────────────
+// Global scope; surfaced in editor autocomplete and the manage modal.
+
+export type Snippet = {
+  id: string;
+  name: string;
+  prefix: string;
+  body: string;
+  description: string;
+  created_at: number;
+  updated_at: number;
+};
+
+export type SnippetInput = {
+  /** Omit (or null) to insert; pass the existing id to update in place. */
+  id?: string | null;
+  name: string;
+  prefix: string;
+  body: string;
+  description?: string;
+};
+
 export type McpTarget = {
   key: string;
   label: string;
@@ -208,6 +230,10 @@ export const api = {
   write_file: (path: string, content: string) =>
     invoke<number>("write_file", { path, content }),
   mcp_snippet: () => invoke<McpSnippet>("mcp_snippet"),
+  list_snippets: () => invoke<Snippet[]>("list_snippets"),
+  upsert_snippet: (input: SnippetInput) =>
+    invoke<Snippet>("upsert_snippet", { input }),
+  delete_snippet: (id: string) => invoke<void>("delete_snippet", { id }),
   classify_schema: (connection: string) =>
     invoke<ClassifyOutcome>("classify_schema", { connection }),
   list_classifications: (connection: string) =>

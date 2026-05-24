@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::types::{
-    Category, Classification, ClassificationStatus, Connection, NewConnectionInput,
+    Category, Classification, ClassificationStatus, Connection, NewConnectionInput, Snippet,
+    SnippetInput,
 };
 
 const KEYRING_SERVICE: &str = "com.dbapp.poc";
@@ -138,6 +139,27 @@ pub async fn open_metadata() -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+
+    // SQL editor snippets — user-managed templates surfaced in autocomplete.
+    // Global scope: SQL is portable across connections. `prefix` is the
+    // expansion trigger (unique, case-insensitive); `body` carries CodeMirror
+    // ${var} tab stops.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS snippets (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            prefix      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            body        TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            created_at  INTEGER NOT NULL,
+            updated_at  INTEGER NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    seed_default_snippets(&pool).await?;
 
     // Sensitivity classifications — per-column PHI / PCI / PII labels.
     // Keyed by (connection_id, schema, table, column). Status starts at
@@ -444,4 +466,186 @@ pub fn get_redaction_secret(conn_name: &str) -> Result<Option<[u8; 32]>> {
 
 fn delete_redaction_secret(conn_name: &str) -> Result<()> {
     secret_store::delete(KEYRING_SERVICE, &redaction_secret_entry_name(conn_name))
+}
+
+// ── Snippets ──────────────────────────────────────────────────────
+
+fn row_to_snippet(r: &sqlx::sqlite::SqliteRow) -> Snippet {
+    Snippet {
+        id: r.get("id"),
+        name: r.get("name"),
+        prefix: r.get("prefix"),
+        body: r.get("body"),
+        description: r.get("description"),
+        created_at: r.get::<i64, _>("created_at"),
+        updated_at: r.get::<i64, _>("updated_at"),
+    }
+}
+
+pub async fn list_snippets(pool: &SqlitePool) -> Result<Vec<Snippet>> {
+    let rows = sqlx::query(
+        "SELECT id, name, prefix, body, description, created_at, updated_at
+         FROM snippets ORDER BY LOWER(name)",
+    )
+    .fetch_all(pool)
+    .await
+    .with_context(|| "list snippets")?;
+    Ok(rows.iter().map(row_to_snippet).collect())
+}
+
+/// Insert or update a snippet. When `input.id` is None, a fresh UUID is
+/// minted; when present, the row is updated in place (preserving created_at).
+/// Returns the resulting Snippet.
+pub async fn upsert_snippet(pool: &SqlitePool, input: SnippetInput) -> Result<Snippet> {
+    let name = input.name.trim().to_string();
+    let prefix = input.prefix.trim().to_string();
+    let body = input.body;
+    let description = input.description;
+    if name.is_empty() {
+        anyhow::bail!("name is required");
+    }
+    if prefix.is_empty() {
+        anyhow::bail!("prefix is required");
+    }
+    if !prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        anyhow::bail!("prefix may only contain letters, digits, and underscores");
+    }
+    if body.trim().is_empty() {
+        anyhow::bail!("body is required");
+    }
+    let now = chrono::Utc::now().timestamp();
+    match input.id {
+        Some(id) => {
+            sqlx::query(
+                "UPDATE snippets
+                    SET name = ?2, prefix = ?3, body = ?4, description = ?5, updated_at = ?6
+                  WHERE id = ?1",
+            )
+            .bind(&id)
+            .bind(&name)
+            .bind(&prefix)
+            .bind(&body)
+            .bind(&description)
+            .bind(now)
+            .execute(pool)
+            .await
+            .with_context(|| format!("update snippet {id}"))?;
+            let r = sqlx::query(
+                "SELECT id, name, prefix, body, description, created_at, updated_at
+                   FROM snippets WHERE id = ?1",
+            )
+            .bind(&id)
+            .fetch_one(pool)
+            .await
+            .with_context(|| format!("re-read snippet {id}"))?;
+            Ok(row_to_snippet(&r))
+        }
+        None => {
+            let id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO snippets (id, name, prefix, body, description, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            )
+            .bind(&id)
+            .bind(&name)
+            .bind(&prefix)
+            .bind(&body)
+            .bind(&description)
+            .bind(now)
+            .execute(pool)
+            .await
+            .with_context(|| format!("insert snippet {name}"))?;
+            Ok(Snippet {
+                id,
+                name,
+                prefix,
+                body,
+                description,
+                created_at: now,
+                updated_at: now,
+            })
+        }
+    }
+}
+
+pub async fn delete_snippet(pool: &SqlitePool, id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM snippets WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .with_context(|| format!("delete snippet {id}"))?;
+    Ok(())
+}
+
+/// Insert the built-in starter set on first launch (empty table). Idempotent —
+/// re-runs do nothing once snippets exist. Users can edit or delete these
+/// freely; we never re-seed.
+async fn seed_default_snippets(pool: &SqlitePool) -> Result<()> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM snippets")
+        .fetch_one(pool)
+        .await?;
+    if count > 0 {
+        return Ok(());
+    }
+    let now = chrono::Utc::now().timestamp();
+    let defaults: &[(&str, &str, &str, &str)] = &[
+        (
+            "select … from",
+            "sf",
+            "select ${columns} from ${table}${}",
+            "Pick columns from a table.",
+        ),
+        (
+            "select * from … where",
+            "sfw",
+            "select * from ${table} where ${condition}${}",
+            "Filtered scan with a where clause.",
+        ),
+        (
+            "select … join",
+            "sj",
+            "select ${cols}\nfrom ${table_a} a\njoin ${table_b} b on a.${a_id} = b.${b_id}\nwhere ${condition}${}",
+            "Two-table inner join with aliases.",
+        ),
+        (
+            "insert into …",
+            "ins",
+            "insert into ${table} (${cols})\nvalues (${vals})${}",
+            "Plain insert.",
+        ),
+        (
+            "update … set",
+            "upd",
+            "update ${table}\nset ${col} = ${val}\nwhere ${condition}${}",
+            "Targeted update with a where clause.",
+        ),
+        (
+            "with … as (CTE)",
+            "cte",
+            "with ${cte} as (\n  ${query}\n)\nselect * from ${cte}${}",
+            "Common table expression scaffold.",
+        ),
+        (
+            "case when … else",
+            "case",
+            "case when ${condition} then ${then} else ${else} end${}",
+            "Inline conditional expression.",
+        ),
+    ];
+    for (name, prefix, body, description) in defaults {
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO snippets (id, name, prefix, body, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(prefix)
+        .bind(body)
+        .bind(description)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
