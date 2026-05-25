@@ -24,6 +24,10 @@ type Props = {
   value: string;
   onChange: (v: string) => void;
   onRun?: () => void;
+  /** ⌘S — write-through for library tabs, else opens the save sheet. */
+  onSave?: () => void;
+  /** ⌘⇧S — always opens the save sheet as a fresh entry. */
+  onSaveAs?: () => void;
   readOnly?: boolean;
   height?: string | number;
   /** SQLNamespace-shaped schema; updates reconfigure the editor in place. */
@@ -173,6 +177,8 @@ export function SqlEditor({
   value,
   onChange,
   onRun,
+  onSave,
+  onSaveAs,
   readOnly,
   height,
   schema,
@@ -301,12 +307,42 @@ export function SqlEditor({
             ]),
           ]
         : []),
+      // Mod-Shift-s must be registered before Mod-s so CodeMirror's keymap
+      // dispatch matches the more specific binding first.
+      ...(onSaveAs
+        ? [
+            keymap.of([
+              {
+                key: "Mod-Shift-s",
+                preventDefault: true,
+                run: () => {
+                  onSaveAs();
+                  return true;
+                },
+              },
+            ]),
+          ]
+        : []),
+      ...(onSave
+        ? [
+            keymap.of([
+              {
+                key: "Mod-s",
+                preventDefault: true,
+                run: () => {
+                  onSave();
+                  return true;
+                },
+              },
+            ]),
+          ]
+        : []),
     ];
     // schema/defaultSchema/snippets deliberately excluded — we react to those
     // via the compartment reconfigure effects below so the extension list
     // stays stable across re-renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onRun, sqlCompartment, snippetCompartment, onEnsureColumns]);
+  }, [onRun, onSave, onSaveAs, sqlCompartment, snippetCompartment, onEnsureColumns]);
 
   // When the schema changes, reconfigure the SQL extension in place. This is
   // the load-bearing call for live intellisense: lazy describe_table results

@@ -578,6 +578,96 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   color: var(--text-muted);
 }
 
+/* — Library (saved query) row — */
+.library-row {
+  display: flex;
+  align-items: center;
+  padding: 3px 12px 3px 24px;
+  color: var(--text-secondary);
+  min-height: 22px;
+  position: relative;
+  user-select: none;
+}
+.library-row:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+.library-row.armed {
+  background: color-mix(in oklab, var(--op-destruct) 14%, transparent);
+}
+.library-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  padding: 0;
+}
+.library-row-glyph {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.library-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.library-row-scope {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  line-height: 14px;
+  padding: 0 5px;
+  border: 1px solid var(--line-default);
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+}
+.library-row-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 80ms ease;
+}
+.library-row:hover .library-row-actions,
+.library-row.armed .library-row-actions {
+  opacity: 1;
+}
+.library-row-act {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+.library-row-act:hover {
+  background: var(--bg-elevated-2);
+  color: var(--text-primary);
+}
+.library-row-act.destruct:hover {
+  color: var(--op-destruct);
+}
+
 /* — Privacy badge on table row — */
 .schema-row-privacy {
   display: inline-flex;

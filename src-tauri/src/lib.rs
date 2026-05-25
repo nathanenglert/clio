@@ -12,7 +12,7 @@ use core::Core;
 use pool::PoolRegistry;
 use rmcp::{transport::stdio, ServiceExt};
 use tauri::{
-    menu::{AboutMetadata, CheckMenuItem, Menu, PredefinedMenuItem, Submenu},
+    menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     Emitter, Manager, Runtime, State,
 };
 use types::*;
@@ -204,6 +204,33 @@ async fn delete_snippet(state: State<'_, Core>, id: String) -> Result<(), String
 }
 
 #[tauri::command]
+async fn list_saved_queries(
+    state: State<'_, Core>,
+    connection: Option<String>,
+) -> Result<Vec<SavedQuery>, String> {
+    core::list_saved_queries(&state, connection.as_deref())
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
+async fn upsert_saved_query(
+    state: State<'_, Core>,
+    input: SavedQueryInput,
+) -> Result<SavedQuery, String> {
+    core::upsert_saved_query(&state, input)
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
+async fn delete_saved_query(state: State<'_, Core>, id: String) -> Result<(), String> {
+    core::delete_saved_query(&state, &id)
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
 fn mcp_snippet() -> Result<McpSnippet, String> {
     let path = std::env::current_exe()
         .map_err(|e| e.to_string())?
@@ -276,6 +303,14 @@ const REVEAL_MENU_ID: &str = "view.reveal_sensitive";
 /// global state and pass `reveal` into subsequent `run_query` calls.
 const REVEAL_EVENT_NAME: &str = "reveal-sensitive";
 
+/// File menu Save / Save As items. Frontend listens for the matching events
+/// and routes them to the same handlers the CodeMirror ⌘S / ⌘⇧S bindings use,
+/// so the native menu and the in-editor shortcut produce identical behavior.
+const SAVE_QUERY_MENU_ID: &str = "file.save_query";
+const SAVE_QUERY_AS_MENU_ID: &str = "file.save_query_as";
+const SAVE_QUERY_EVENT: &str = "save-query";
+const SAVE_QUERY_AS_EVENT: &str = "save-query-as";
+
 /// Recursively search the app's menu tree for a CheckMenuItem with `id`.
 /// `Menu::get` only checks the top level; submenus need a manual walk.
 fn find_check_item<R: Runtime>(
@@ -342,11 +377,35 @@ fn build_app_menu<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R
         ],
     )?;
 
+    // File menu: Save / Save as… for the active query tab, plus close_window.
+    // The accelerators here are what macOS surfaces in the menu chrome; the
+    // frontend also binds ⌘S / ⌘⇧S inside the SQL editor as a defensive
+    // fallback in case the menu doesn't intercept (e.g. window not frontmost
+    // in some edge case).
+    let save_query_item = MenuItem::with_id(
+        app,
+        SAVE_QUERY_MENU_ID,
+        "Save query",
+        true,
+        Some("CmdOrCtrl+S"),
+    )?;
+    let save_query_as_item = MenuItem::with_id(
+        app,
+        SAVE_QUERY_AS_MENU_ID,
+        "Save query as…",
+        true,
+        Some("CmdOrCtrl+Shift+S"),
+    )?;
     let file_menu = Submenu::with_items(
         app,
         "File",
         true,
-        &[&PredefinedMenuItem::close_window(app, None)?],
+        &[
+            &save_query_item,
+            &save_query_as_item,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
     )?;
 
     let edit_menu = Submenu::with_items(
@@ -422,7 +481,8 @@ pub fn run() {
 
     builder
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == REVEAL_MENU_ID {
+            let id = event.id().as_ref();
+            if id == REVEAL_MENU_ID {
                 // `Menu::get` only searches the top-level; our item lives
                 // under View. Walk submenus to find it. Native menus
                 // auto-toggle their visual checkmark BEFORE the event fires,
@@ -431,6 +491,10 @@ pub fn run() {
                     let new_state = check.is_checked().unwrap_or(false);
                     let _ = app.emit(REVEAL_EVENT_NAME, new_state);
                 }
+            } else if id == SAVE_QUERY_MENU_ID {
+                let _ = app.emit(SAVE_QUERY_EVENT, ());
+            } else if id == SAVE_QUERY_AS_MENU_ID {
+                let _ = app.emit(SAVE_QUERY_AS_EVENT, ());
             }
         })
         .setup(|app| {
@@ -477,6 +541,9 @@ pub fn run() {
             list_snippets,
             upsert_snippet,
             delete_snippet,
+            list_saved_queries,
+            upsert_saved_query,
+            delete_saved_query,
             classify_schema,
             list_classifications,
             update_classification,

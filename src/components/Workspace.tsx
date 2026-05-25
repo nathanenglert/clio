@@ -25,6 +25,10 @@ type Props = {
   onAddTab: () => void;
   onSqlChange: (id: string, sql: string) => void;
   onRun: () => void;
+  /** ⌘S — write-through for library tabs, else opens the save sheet. */
+  onSave: () => void;
+  /** ⌘⇧S — always opens the save sheet as a fresh entry. */
+  onSaveAs: () => void;
   onOpenMcpModal: () => void;
   /** Editing state hook (App-owned). */
   editing: ReturnType<typeof useEditing>;
@@ -48,6 +52,8 @@ export function Workspace({
   onAddTab,
   onSqlChange,
   onRun,
+  onSave,
+  onSaveAs,
   onOpenMcpModal,
   editing,
   reveal,
@@ -265,6 +271,8 @@ export function Workspace({
             value={activeTab.sql}
             onChange={(v) => onSqlChange(activeTab.id, v)}
             onRun={onRun}
+            onSave={onSave}
+            onSaveAs={onSaveAs}
             schema={intellisense.schema}
             defaultSchema={intellisense.defaultSchema}
             onEnsureColumns={intellisense.ensureColumns}

@@ -7,6 +7,7 @@ import {
   type ClassifyOutcome,
   type ColumnSearchHit,
   type Connection,
+  type SavedQuery,
   type TableKind,
   type TableSummary,
 } from "../lib/api";
@@ -29,6 +30,14 @@ type Props = {
   /** Imperative hook: receives a fn the parent can call to pop open the
    *  connections popover. Used by the command palette ("Manage connections"). */
   openConnectionsRef?: React.MutableRefObject<(() => void) | null>;
+  /** Saved queries in scope for the current connection (globals + scoped). */
+  libraryEntries?: SavedQuery[];
+  /** Open a saved query in a tab. */
+  onOpenLibrary?: (q: SavedQuery) => void;
+  /** Open a saved query in a tab and run it immediately. */
+  onRunLibrary?: (q: SavedQuery) => void;
+  /** Delete a saved query (already confirmed at the call site). */
+  onDeleteLibrary?: (q: SavedQuery) => void;
 };
 
 const DELETE_CONFIRM_TIMEOUT_MS = 3000;
@@ -124,9 +133,26 @@ export function SchemaTree({
   onPickTable,
   onReviewSensitivity,
   openConnectionsRef,
+  libraryEntries,
+  onOpenLibrary,
+  onRunLibrary,
+  onDeleteLibrary,
 }: Props) {
   const connection = connections.find((c) => c.name === activeName) ?? null;
   const connectionName = connection && connection.connected ? connection.name : null;
+
+  // Library section open state — independent of the schema tree, persisted
+  // across re-renders but not across reloads (intentional: less state to
+  // manage; default open is fine since the row count is the only chrome).
+  const [libraryOpen, setLibraryOpen] = useState(true);
+  // Row id pending delete confirmation. A row enters "armed" state on first
+  // click of the × button; second click within the timeout window deletes.
+  const [libraryArmed, setLibraryArmed] = useState<string | null>(null);
+  useEffect(() => {
+    if (!libraryArmed) return;
+    const t = window.setTimeout(() => setLibraryArmed(null), DELETE_CONFIRM_TIMEOUT_MS);
+    return () => window.clearTimeout(t);
+  }, [libraryArmed]);
 
   const [schemas, setSchemas] = useState<string[]>([]);
   const [openSchemas, setOpenSchemas] = useState<Record<string, boolean>>({});
@@ -445,6 +471,18 @@ export function SchemaTree({
     if (focusedIdx >= filteredView.length) setFocusedIdx(Math.max(0, filteredView.length - 1));
   }, [filteredView.length, focusedIdx]);
 
+  // Library entries filtered by the same search box (name + description).
+  // No fancy ranking — substring match is enough at expected list sizes.
+  const filteredLibrary = useMemo(() => {
+    const entries = libraryEntries ?? [];
+    const q = filter.trim().toLowerCase();
+    if (!q) return entries;
+    return entries.filter(
+      (e) =>
+        e.name.toLowerCase().includes(q) || e.description.toLowerCase().includes(q),
+    );
+  }, [libraryEntries, filter]);
+
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape" && filter) {
       e.preventDefault();
@@ -659,6 +697,95 @@ export function SchemaTree({
         {loadingRoot && schemas.length === 0 && !error && (
           <div className="schema-loading mono">Loading schemas…</div>
         )}
+
+        {/* ── Library (saved queries) ─────────────────────────────── */}
+        {libraryEntries !== undefined &&
+          (filter.trim().length === 0 || filteredLibrary.length > 0) && (
+            <>
+              <button
+                type="button"
+                className="schema-group"
+                onClick={() => setLibraryOpen((v) => !v)}
+                aria-expanded={libraryOpen}
+                title={libraryOpen ? "Collapse Library" : "Expand Library"}
+              >
+                <span
+                  className={`schema-group-chev ${libraryOpen ? "open" : ""}`}
+                  aria-hidden
+                >
+                  ▸
+                </span>
+                <span className="schema-group-name">Library</span>
+                <span className="schema-group-count mono">{filteredLibrary.length}</span>
+              </button>
+              {libraryOpen && filteredLibrary.length === 0 && (
+                <div className="schema-empty-row mono">
+                  {filter.trim().length > 0
+                    ? "no library matches"
+                    : "no saved queries — ⌘S to save"}
+                </div>
+              )}
+              {libraryOpen &&
+                filteredLibrary.map((q) => {
+                  const armed = libraryArmed === q.id;
+                  return (
+                    <div
+                      key={q.id}
+                      className={`library-row${armed ? " armed" : ""}`}
+                      title={q.description || q.name}
+                    >
+                      <button
+                        type="button"
+                        className="library-row-main"
+                        onClick={() => onOpenLibrary?.(q)}
+                      >
+                        <span className="library-row-glyph" aria-hidden>
+                          ◆
+                        </span>
+                        <span className="library-row-name">{q.name}</span>
+                        {q.connection_name === null && (
+                          <span
+                            className="library-row-scope mono"
+                            title="Global — visible on every connection"
+                          >
+                            global
+                          </span>
+                        )}
+                      </button>
+                      <div className="library-row-actions">
+                        <button
+                          type="button"
+                          className="library-row-act"
+                          title="Open and run"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onRunLibrary?.(q);
+                          }}
+                        >
+                          ▶
+                        </button>
+                        <button
+                          type="button"
+                          className="library-row-act destruct"
+                          title={armed ? "Click again to delete" : "Delete saved query"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (armed) {
+                              setLibraryArmed(null);
+                              onDeleteLibrary?.(q);
+                            } else {
+                              setLibraryArmed(q.id);
+                            }
+                          }}
+                        >
+                          {armed ? "✗" : "×"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+            </>
+          )}
 
         {/* Default browse: schema groups with their tables */}
         {!inSearch &&
