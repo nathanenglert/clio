@@ -3,7 +3,13 @@
 // pending edits never persist across app restarts.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type ColumnDescription, type MutationOutcome, type QueryResult } from "./api";
+import {
+  api,
+  type ColumnDescription,
+  type MutationOutcome,
+  type QueryResult,
+  type TableDescription,
+} from "./api";
 import {
   type ActiveAdd,
   type PendingBatch,
@@ -30,7 +36,9 @@ type ColMetaKey = string; // `${conn}.${schema}.${table}`
 export function useEditing(connectionName: string | null) {
   const [batches, setBatches] = useState<Record<string, PendingBatch>>({});
   const [activeAdds, setActiveAddsMap] = useState<Record<string, ActiveAdd_[]>>({});
-  const [columnsMeta, setColumnsMeta] = useState<Record<ColMetaKey, ColumnDescription[]>>({});
+  // Cache the full TableDescription so both editing (columns/PK) and the
+  // Structure pane share a single describe_table round-trip per relation.
+  const [tableMeta, setTableMeta] = useState<Record<ColMetaKey, TableDescription>>({});
   const [busy, setBusy] = useState(false);
   const tempIdCounter = useRef(0);
 
@@ -39,25 +47,33 @@ export function useEditing(connectionName: string | null) {
     async (schema: string, table: string): Promise<ColumnDescription[] | null> => {
       if (!connectionName) return null;
       const key = `${connectionName}.${schema}.${table}`;
-      const cached = columnsMeta[key];
-      if (cached) return cached;
+      const cached = tableMeta[key];
+      if (cached) return cached.columns;
       try {
-        const cols = await api.describe_table(connectionName, schema, table);
-        setColumnsMeta((p) => ({ ...p, [key]: cols }));
-        return cols;
+        const desc = await api.describe_table(connectionName, schema, table);
+        setTableMeta((p) => ({ ...p, [key]: desc }));
+        return desc.columns;
       } catch {
         return null;
       }
     },
-    [connectionName, columnsMeta],
+    [connectionName, tableMeta],
   );
 
   const getMeta = useCallback(
     (schema: string, table: string): ColumnDescription[] | null => {
       if (!connectionName) return null;
-      return columnsMeta[`${connectionName}.${schema}.${table}`] ?? null;
+      return tableMeta[`${connectionName}.${schema}.${table}`]?.columns ?? null;
     },
-    [connectionName, columnsMeta],
+    [connectionName, tableMeta],
+  );
+
+  const getTableMeta = useCallback(
+    (schema: string, table: string): TableDescription | null => {
+      if (!connectionName) return null;
+      return tableMeta[`${connectionName}.${schema}.${table}`] ?? null;
+    },
+    [connectionName, tableMeta],
   );
 
   const getBatch = useCallback((tabId: string) => batches[tabId] ?? emptyBatch, [batches]);
@@ -180,7 +196,7 @@ export function useEditing(connectionName: string | null) {
   useEffect(() => {
     setBatches({});
     setActiveAddsMap({});
-    setColumnsMeta({});
+    setTableMeta({});
   }, [connectionName]);
 
   return {
@@ -189,6 +205,7 @@ export function useEditing(connectionName: string | null) {
     getActiveAdds,
     ensureMeta,
     getMeta,
+    getTableMeta,
     stageEditCell,
     stageDeleteRow,
     undoDeleteRow,

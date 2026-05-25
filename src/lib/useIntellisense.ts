@@ -128,8 +128,8 @@ export function useIntellisense(connectionName: string | null): Intellisense {
       inflight.current.add(key);
       api
         .describe_table(connectionName, schema, table)
-        .then((cols) => {
-          const completions = cols.map(buildColumnCompletion);
+        .then((desc) => {
+          const completions = desc.columns.map(buildColumnCompletion);
           setColumns((prev) => ({ ...prev, [key]: completions }));
         })
         .catch(() => {

@@ -25,6 +25,67 @@ export type ColumnDescription = Column & {
   enum_values?: string[];
 };
 
+export type IndexInfo = {
+  name: string;
+  /** Reconstructed CREATE INDEX from pg_get_indexdef. */
+  definition: string;
+  is_unique: boolean;
+  is_primary: boolean;
+  /** Column names in index order. "(expression)" for expression indexes. */
+  columns: string[];
+};
+
+export type ConstraintKind =
+  | "primary_key"
+  | "foreign_key"
+  | "unique"
+  | "check"
+  | "exclusion";
+
+export type ForeignKeyTarget = {
+  schema: string;
+  table: string;
+  columns: string[];
+};
+
+export type ConstraintInfo = {
+  name: string;
+  kind: ConstraintKind;
+  /** pg_get_constraintdef text — uniform across kinds. */
+  definition: string;
+  columns: string[];
+  /** Present only when kind === "foreign_key". */
+  references?: ForeignKeyTarget;
+};
+
+export type TriggerInfo = {
+  name: string;
+  /** "BEFORE" | "AFTER" | "INSTEAD OF". */
+  timing: string;
+  /** Comma-joined: "INSERT", "UPDATE", "DELETE", "TRUNCATE". */
+  events: string;
+  /** "ROW" | "STATEMENT". */
+  level: string;
+  /** pg_get_triggerdef text. */
+  definition: string;
+};
+
+export type ViewDefinition = {
+  sql: string;
+  is_materialized: boolean;
+};
+
+/** Full structural payload returned by describe_table — feeds the Structure
+ *  pane and editing.ensureMeta's column cache. */
+export type TableDescription = {
+  kind: TableKind;
+  columns: ColumnDescription[];
+  indexes: IndexInfo[];
+  constraints: ConstraintInfo[];
+  triggers: TriggerInfo[];
+  view_definition?: ViewDefinition;
+};
+
 export type TableKind = "table" | "view" | "matview" | "partitioned" | "foreign";
 
 export type TableSummary = {
@@ -211,7 +272,7 @@ export const api = {
   search_columns: (connection: string, query: string, limit = 50) =>
     invoke<ColumnSearchHit[]>("search_columns", { connection, query, limit }),
   describe_table: (connection: string, schema: string, table: string) =>
-    invoke<ColumnDescription[]>("describe_table", {
+    invoke<TableDescription>("describe_table", {
       connection,
       schema,
       table,

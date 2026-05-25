@@ -2642,3 +2642,243 @@ body.dragging-y * { cursor: inherit !important; }
   font-size: 10px;
   margin-right: 4px;
 }
+
+/* ── Table Structure pane ─────────────────────────────────────────
+   Mounted in the Workspace when a "table" tab flips to Structure mode.
+   Matches design/screenshots/11 — header → facet strip → list/card body. */
+
+.table-structure {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--bg-app);
+}
+
+.ts-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 14px 16px 6px;
+  flex: 0 0 auto;
+}
+.ts-name {
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.ts-name-schema {
+  color: var(--text-muted);
+}
+.ts-kind-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.05em;
+  background: rgba(181, 145, 196, 0.14);
+  color: var(--op-ddl);
+}
+
+.ts-facets {
+  display: flex;
+  gap: 14px;
+  padding: 6px 16px 0;
+  border-bottom: 1px solid var(--line-soft);
+  flex: 0 0 auto;
+}
+.ts-facet {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1.5px solid transparent;
+  color: var(--text-muted);
+  padding: 6px 2px 8px;
+  margin-bottom: -1px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  cursor: pointer;
+}
+.ts-facet:hover { color: var(--text-secondary); }
+.ts-facet.on {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-secondary);
+}
+.ts-facet-count {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.ts-facet.on .ts-facet-count {
+  color: var(--text-muted);
+}
+
+.ts-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 16px 16px;
+}
+
+.ts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Columns: tight one-line-per-column list (echoes screenshot 11). */
+.ts-col-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.ts-col-row:hover {
+  background: var(--bg-elevated);
+}
+.ts-col-glyph {
+  color: var(--op-write);
+  width: 10px;
+  text-align: center;
+}
+.ts-col-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  min-width: 0;
+}
+.ts-col-default {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+}
+.ts-col-enum {
+  font-size: 10px;
+  color: var(--op-ddl);
+}
+.ts-col-type {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* Tags shared across facets. */
+.ts-tag {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.05em;
+  background: var(--bg-elevated-2);
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+.ts-tag-faint { color: var(--text-muted); background: transparent; }
+.ts-tag-pk           { color: var(--op-write); background: var(--op-write-soft); }
+.ts-tag-primary_key  { color: var(--op-write); background: var(--op-write-soft); }
+.ts-tag-foreign_key  { color: var(--privacy); background: var(--privacy-soft); }
+.ts-tag-unique       { color: var(--op-read); background: var(--op-read-soft); }
+.ts-tag-check        { color: var(--op-ddl); background: var(--op-ddl-soft); }
+.ts-tag-exclusion    { color: var(--op-destruct); background: var(--op-destruct-soft); }
+
+/* Card layout used for indexes / constraints / triggers. */
+.ts-card {
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  margin-bottom: 6px;
+}
+.ts-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ts-card-name {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.ts-card-cols {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.ts-card-ref {
+  font-size: 11px;
+  color: var(--privacy);
+}
+.ts-card-def {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: var(--bg-input);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.ts-view-banner {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-default);
+  border-radius: 5px;
+  background: var(--bg-panel);
+}
+.ts-view-banner-head {
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  color: var(--op-ddl);
+  margin-bottom: 6px;
+}
+.ts-view-sql {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.ts-empty {
+  padding: 30px 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.ts-loading {
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.ts-loading-target { color: var(--text-secondary); }
+
+/* Data/Structure segmented control sits inside the editor toolbar. */
+.ws-mode-seg {
+  display: inline-flex;
+  border: 1px solid var(--line-default);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.ws-mode-seg button {
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--line-faint);
+  color: var(--text-muted);
+  padding: 3px 10px;
+  font-size: 11px;
+  font-family: var(--font-ui);
+  cursor: pointer;
+}
+.ws-mode-seg button:last-child { border-right: 0; }
+.ws-mode-seg button.on {
+  background: var(--bg-elevated-2);
+  color: var(--text-primary);
+}

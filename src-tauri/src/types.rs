@@ -93,6 +93,101 @@ pub struct ColumnDescription {
     pub enum_values: Option<Vec<String>>,
 }
 
+/// Full structural picture of one relation, surfaced by `describe_table` to
+/// both the UI (Structure pane) and MCP agents. Sections that don't apply to
+/// a given relkind come back empty/None — e.g. a table has no
+/// `view_definition`, a view has no `triggers` (typically).
+#[derive(Debug, Clone, Serialize)]
+pub struct TableDescription {
+    pub kind: TableKind,
+    pub columns: Vec<ColumnDescription>,
+    pub indexes: Vec<IndexInfo>,
+    pub constraints: Vec<ConstraintInfo>,
+    pub triggers: Vec<TriggerInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_definition: Option<ViewDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexInfo {
+    pub name: String,
+    /// Reconstructed CREATE INDEX statement from pg_get_indexdef. Captures
+    /// expression indexes, partial WHERE clauses, ops classes — things you
+    /// can't reconstruct from pg_index alone.
+    pub definition: String,
+    pub is_unique: bool,
+    pub is_primary: bool,
+    /// Column names in index order. For expression indexes, the expression's
+    /// text appears in place of a column name.
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintKind {
+    PrimaryKey,
+    ForeignKey,
+    Unique,
+    Check,
+    Exclusion,
+}
+
+impl ConstraintKind {
+    /// Maps the single-char contype in pg_constraint.
+    pub fn from_contype(c: char) -> Option<Self> {
+        match c {
+            'p' => Some(ConstraintKind::PrimaryKey),
+            'f' => Some(ConstraintKind::ForeignKey),
+            'u' => Some(ConstraintKind::Unique),
+            'c' => Some(ConstraintKind::Check),
+            'x' => Some(ConstraintKind::Exclusion),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConstraintInfo {
+    pub name: String,
+    pub kind: ConstraintKind,
+    /// Reconstructed definition from pg_get_constraintdef — uniform across
+    /// PK/FK/UNIQUE/CHECK, includes the `REFERENCES ...` clause for FKs.
+    pub definition: String,
+    /// Columns this constraint covers, in declared order.
+    pub columns: Vec<String>,
+    /// FK only — target schema, table, columns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub references: Option<ForeignKeyTarget>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForeignKeyTarget {
+    pub schema: String,
+    pub table: String,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TriggerInfo {
+    pub name: String,
+    /// "BEFORE" | "AFTER" | "INSTEAD OF".
+    pub timing: String,
+    /// Comma-joined events: "INSERT", "UPDATE", "DELETE", "TRUNCATE".
+    pub events: String,
+    /// "ROW" | "STATEMENT".
+    pub level: String,
+    /// Reconstructed CREATE TRIGGER from pg_get_triggerdef — single source of
+    /// truth for the action / WHEN clause / referenced function.
+    pub definition: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ViewDefinition {
+    /// pg_get_viewdef output — the SELECT body.
+    pub sql: String,
+    pub is_materialized: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ColumnMeta {
     pub name: String,

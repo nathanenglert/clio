@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Connection } from "../lib/api";
 import { Splitter } from "./Splitter";
 import { TabBar } from "./TabBar";
@@ -6,12 +6,15 @@ import { SqlEditor, type SqlEditorHandle } from "./SqlEditor";
 import { ExportMenu } from "./ExportMenu";
 import { ResultsGrid } from "./ResultsGrid";
 import { JsonSidebar, type JsonSidebarTarget } from "./JsonSidebar";
+import { TableStructure } from "./TableStructure";
 import { useResizable } from "../lib/useResizable";
 import { getEdit } from "../lib/editing";
 import type { Tab } from "../lib/useTabs";
 import type { useEditing } from "../lib/useEditing";
 import type { Intellisense } from "../lib/useIntellisense";
 import type { Snippets } from "../lib/useSnippets";
+
+type TabMode = "data" | "structure";
 
 type Props = {
   active: Connection | null;
@@ -70,6 +73,14 @@ export function Workspace({
   // JSON sidebar — open target by row index + column name. Closed when null.
   const [jsonOpen, setJsonOpen] = useState<{ rowIdx: number; col: string } | null>(null);
 
+  // Data/Structure mode per "table" tab. Defaults to "data"; flipping is
+  // user-driven (segmented control). Map is keyed by tab id and only populated
+  // for tabs the user has actively toggled — absence means Data.
+  const [tabModes, setTabModes] = useState<Record<string, TabMode>>({});
+  const setTabMode = useCallback((id: string, mode: TabMode) => {
+    setTabModes((p) => ({ ...p, [id]: mode }));
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "e") {
@@ -91,6 +102,10 @@ export function Workspace({
   const isTableTab = activeTab?.source === "table" && !!activeTab.schemaTableKey;
   const [schema, table] = (activeTab?.schemaTableKey ?? ".").split(".");
   const editable = !!(active?.connected && isTableTab && activeTab?.result);
+  const tabMode: TabMode = (activeTab && tabModes[activeTab.id]) ?? "data";
+  const showStructure = isTableTab && tabMode === "structure";
+  const tableDescription =
+    isTableTab && schema && table ? editing.getTableMeta(schema, table) : null;
 
   useEffect(() => {
     if (!isTableTab || !schema || !table) return;
@@ -166,36 +181,60 @@ export function Workspace({
       />
 
       <div className="editor-toolbar">
-        <button
-          className="run-chip"
-          onClick={onRun}
-          disabled={running || !active.connected || !activeTab}
-          aria-label="Run query"
-        >
-          <span className="run-icon" aria-hidden>▶</span>
-          <span>{running ? "Running…" : "Run"}</span>
-          <kbd className="kbd">⌘↵</kbd>
-        </button>
-        <button className="editor-btn soon" disabled title="Format SQL — coming soon">
-          Format
-        </button>
-        <button className="editor-btn soon" disabled title="EXPLAIN — coming soon">
-          EXPLAIN
-        </button>
-        <button
-          className="editor-btn"
-          onClick={() => {
-            const sel = editorRef.current?.getSelection() ?? "";
-            const seed = sel.trim().length > 0 ? sel : undefined;
-            onOpenSnippets(seed);
-          }}
-          title="Manage snippets — opens with the editor selection prefilled, or empty to browse"
-        >
-          <span className="editor-btn-icon" aria-hidden>{"{·}"}</span>
-          Snippets
-        </button>
+        {isTableTab && activeTab && (
+          <div className="ws-mode-seg" role="tablist" aria-label="View mode">
+            <button
+              role="tab"
+              aria-selected={tabMode === "data"}
+              className={tabMode === "data" ? "on" : ""}
+              onClick={() => setTabMode(activeTab.id, "data")}
+            >
+              Data
+            </button>
+            <button
+              role="tab"
+              aria-selected={tabMode === "structure"}
+              className={tabMode === "structure" ? "on" : ""}
+              onClick={() => setTabMode(activeTab.id, "structure")}
+            >
+              Structure
+            </button>
+          </div>
+        )}
+        {!showStructure && (
+          <>
+            <button
+              className="run-chip"
+              onClick={onRun}
+              disabled={running || !active.connected || !activeTab}
+              aria-label="Run query"
+            >
+              <span className="run-icon" aria-hidden>▶</span>
+              <span>{running ? "Running…" : "Run"}</span>
+              <kbd className="kbd">⌘↵</kbd>
+            </button>
+            <button className="editor-btn soon" disabled title="Format SQL — coming soon">
+              Format
+            </button>
+            <button className="editor-btn soon" disabled title="EXPLAIN — coming soon">
+              EXPLAIN
+            </button>
+            <button
+              className="editor-btn"
+              onClick={() => {
+                const sel = editorRef.current?.getSelection() ?? "";
+                const seed = sel.trim().length > 0 ? sel : undefined;
+                onOpenSnippets(seed);
+              }}
+              title="Manage snippets — opens with the editor selection prefilled, or empty to browse"
+            >
+              <span className="editor-btn-icon" aria-hidden>{"{·}"}</span>
+              Snippets
+            </button>
+          </>
+        )}
         <div className="spacer" />
-        {isAgentTab && (
+        {isAgentTab && !showStructure && (
           <span className="agent-badge">
             <span className="agent-dot" />
             written by agent
@@ -204,9 +243,19 @@ export function Workspace({
         <button className="editor-btn ghost" onClick={onOpenMcpModal}>
           MCP
         </button>
-        <span className="editor-meta mono">SQL · UTF-8 · LF</span>
+        {!showStructure && (
+          <span className="editor-meta mono">SQL · UTF-8 · LF</span>
+        )}
       </div>
 
+      {showStructure ? (
+        <TableStructure
+          schema={schema || ""}
+          table={table || ""}
+          description={tableDescription}
+        />
+      ) : (
+        <>
       <div
         className={`editor-wrap${isAgentTab ? " agent" : ""}`}
         style={{ height: editor.size, flex: "0 0 auto" }}
@@ -334,6 +383,8 @@ export function Workspace({
           />
         )}
       </div>
+        </>
+      )}
     </>
   );
 }
