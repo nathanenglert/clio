@@ -29,6 +29,12 @@ export function App() {
   const [showMcp, setShowMcp] = useState(false);
   const [sensitivityFor, setSensitivityFor] = useState<string | null>(null);
 
+  // Bridge from the once-mounted activity listener (closure capture) to the
+  // live `tabs` API — populated below after useTabs runs. Used so
+  // `propose_query` events from the MCP socket can call addAgentTab without
+  // every event listener rebinding on every render.
+  const tabsRef = useRef<ReturnType<typeof useTabs> | null>(null);
+
   const rail = useResizable({
     storageKey: "db.layout.rail.width",
     defaultSize: 260,
@@ -54,6 +60,24 @@ export function App() {
       if (e.tool === "connect" || e.tool === "disconnect" || e.tool === "add_connection" || e.tool === "delete_connection") {
         refresh();
       }
+      if (e.tool === "propose_query" && e.source === "mcp" && e.payload) {
+        const title = e.detail || "Proposed query";
+        const created = tabsRef.current?.addAgentTab(e.payload, title) ?? null;
+        showToast(
+          created ? (
+            <span>
+              <span aria-hidden style={{ color: "var(--agent)", marginRight: 6 }}>◇</span>
+              Agent proposed a query: <span className="mono">{title}</span>
+            </span>
+          ) : (
+            <span>
+              <span aria-hidden style={{ color: "var(--agent)", marginRight: 6 }}>◇</span>
+              Agent proposed a query — connect a database to view it.
+            </span>
+          ),
+          "info",
+        );
+      }
     });
     return () => {
       unlisten.then((u) => u());
@@ -64,6 +88,12 @@ export function App() {
   const active = connections.find((c) => c.name === activeName) ?? null;
   const reveal = useReveal();
   const tabs = useTabs(activeName);
+  // Keep the activity-listener-facing ref pointed at the latest tabs API. The
+  // listener is registered once on mount, but `tabs` changes identity on every
+  // render — see tabsRef declaration above.
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
   const editing = useEditing(activeName);
   // The connection is only useful for completion once it's actually connected.
   // Passing null when disconnected keeps the schema cache from racing the

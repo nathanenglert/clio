@@ -1,6 +1,8 @@
 //! rmcp 1.7 server. Tool handlers call into `core::*` exactly the way the
 //! Tauri commands do — same functions, same emitter, same activity events.
 
+use std::time::Instant;
+
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
@@ -35,6 +37,36 @@ pub struct QueryArg {
     pub connection: String,
     /// SELECT / WITH-SELECT only. Writes/DDL rejected at the POC seam.
     pub sql: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ProposeQueryArg {
+    /// SQL to surface to the human for review. Any statement — the workbench
+    /// will NOT auto-run it.
+    pub sql: String,
+    /// Optional short label for the tab (e.g. "active appointments"). Defaults
+    /// to "Proposed query".
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// Cap full-text payloads (e.g. SQL) emitted on activity events so a long
+/// statement can't blow the socket reader's line buffer. Mirrors
+/// core::query::cap_payload — duplicated here because that helper is
+/// module-private and the constant is small.
+const PROPOSE_PAYLOAD_MAX_BYTES: usize = 4096;
+fn cap_payload(s: &str) -> String {
+    if s.len() <= PROPOSE_PAYLOAD_MAX_BYTES {
+        return s.to_string();
+    }
+    let mut end = PROPOSE_PAYLOAD_MAX_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + 4);
+    out.push_str(&s[..end]);
+    out.push_str(" …");
+    out
 }
 
 #[derive(Clone)]
@@ -129,6 +161,23 @@ impl McpServer {
             .map_err(err)?;
         ok_json(r)
     }
+
+    #[tool(description = "Open a new query tab in the workbench with the given SQL and switch the human to it. Use this when you want the human to REVIEW a query before running it — the tab is marked 'written by agent' and will NOT auto-run; the human reviews and presses Run themselves. The tab opens under whichever connection the human is currently viewing (no connection arg). Returns immediately; the tool succeeds even if no UI is attached.")]
+    async fn propose_query(
+        &self,
+        Parameters(ProposeQueryArg { sql, title }): Parameters<ProposeQueryArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let detail = title.unwrap_or_else(|| "Proposed query".to_string());
+        let payload = Some(cap_payload(&sql));
+        // Fire-and-forget on the activity socket. We construct a synthetic
+        // Ok result so record_ok_with_payload emits a status="ok" event; the
+        // frontend listener turns it into a new agent-authored tab + toast.
+        let result: anyhow::Result<()> = Ok(());
+        self.core
+            .record_ok_with_payload("propose_query", detail.clone(), payload, started, &result);
+        ok_json(serde_json::json!({ "proposed": true, "title": detail }))
+    }
 }
 
 #[tool_handler]
@@ -141,7 +190,7 @@ impl ServerHandler for McpServer {
         )
         .with_server_info(Implementation::from_build_env())
         .with_instructions(
-            "Postgres workbench MCP server. Tools: list_connections, connect, list_schemas, list_tables, describe_table, run_query. All schema/query tools require a `connection` arg matching a name from list_connections. Reads only — writes/DDL rejected.",
+            "Postgres workbench MCP server. Tools: list_connections, connect, list_schemas, list_tables, describe_table, run_query, propose_query. All schema/query tools require a `connection` arg matching a name from list_connections. Reads only — writes/DDL rejected. Use `propose_query` to surface a SQL statement to the human for review (opens a new editor tab; does not auto-run).",
         )
     }
 }
