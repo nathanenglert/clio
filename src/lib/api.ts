@@ -206,6 +206,30 @@ export type SnippetInput = {
   description?: string;
 };
 
+// ── Saved queries (Library) ──────────────────────────────────────
+// Named persistent SQL. Distinct from Snippet (autocomplete template).
+// `connection_name` null = global; otherwise scoped to that connection.
+
+export type SavedQuery = {
+  id: string;
+  name: string;
+  body: string;
+  description: string;
+  connection_name: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+export type SavedQueryInput = {
+  /** Omit / null to insert; pass the existing id to update in place. */
+  id?: string | null;
+  name: string;
+  body: string;
+  description?: string;
+  /** null = global; otherwise scope to that connection. */
+  connection_name?: string | null;
+};
+
 export type McpTarget = {
   key: string;
   label: string;
@@ -295,6 +319,12 @@ export const api = {
   upsert_snippet: (input: SnippetInput) =>
     invoke<Snippet>("upsert_snippet", { input }),
   delete_snippet: (id: string) => invoke<void>("delete_snippet", { id }),
+  list_saved_queries: (connection: string | null = null) =>
+    invoke<SavedQuery[]>("list_saved_queries", { connection }),
+  upsert_saved_query: (input: SavedQueryInput) =>
+    invoke<SavedQuery>("upsert_saved_query", { input }),
+  delete_saved_query: (id: string) =>
+    invoke<void>("delete_saved_query", { id }),
   classify_schema: (connection: string) =>
     invoke<ClassifyOutcome>("classify_schema", { connection }),
   list_classifications: (connection: string) =>

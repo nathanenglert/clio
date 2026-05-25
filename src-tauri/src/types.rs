@@ -348,6 +348,39 @@ pub struct SnippetInput {
     pub description: String,
 }
 
+// ── Saved queries (named, persistent SQL) ─────────────────────────
+//
+// Distinct from snippets: snippets are short autocomplete templates keyed by
+// `prefix`; saved queries are full named SQL bodies you find again by name in
+// the Library sidebar. `connection_name` is the scope — None means global
+// (visible on every connection); Some(name) restricts visibility to that one
+// connection.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedQuery {
+    pub id: String,
+    pub name: String,
+    pub body: String,
+    pub description: String,
+    pub connection_name: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SavedQueryInput {
+    /// Empty / absent on insert; the existing id when updating.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub body: String,
+    #[serde(default)]
+    pub description: String,
+    /// None = global; Some(name) = visible only on that connection.
+    #[serde(default)]
+    pub connection_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct McpTarget {
     pub key: String,

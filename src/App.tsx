@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { api, onActivity, type ActivityEvent, type Connection } from "./lib/api";
 import { SchemaTree } from "./components/SchemaTree";
 import { Workspace } from "./components/Workspace";
@@ -16,8 +17,11 @@ import { useTabs } from "./lib/useTabs";
 import { useEditing } from "./lib/useEditing";
 import { useIntellisense } from "./lib/useIntellisense";
 import { useSnippets } from "./lib/useSnippets";
+import { useSavedQueries } from "./lib/useSavedQueries";
 import { SnippetsModal } from "./components/SnippetsModal";
+import { SaveQuerySheet } from "./components/SaveQuerySheet";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
+import type { SavedQuery } from "./lib/api";
 import { useReveal } from "./lib/useReveal";
 import { isEmpty as batchIsEmpty } from "./lib/editing";
 
@@ -100,10 +104,20 @@ export function App() {
   // connect → list_schemas sequence.
   const intellisense = useIntellisense(active?.connected ? activeName : null);
   const snippets = useSnippets();
+  // Library: saved queries, scoped to the active connection (globals always
+  // included). Hook refetches on connection change.
+  const savedQueries = useSavedQueries(activeName);
   // Open state for the Snippets manager modal. `seedBody` is the initial body
   // when summoned via the editor's "Save as snippet" action; null otherwise.
   const [snippetsModalOpen, setSnippetsModalOpen] = useState(false);
   const [snippetSeed, setSnippetSeed] = useState<string | null>(null);
+  // SaveQuerySheet drives both first-time saves and renames/re-scopes. The
+  // tab id is captured at open time so a write-through binds the right tab
+  // even if the active tab changes while the sheet is open.
+  type SaveSheetState =
+    | { mode: "new"; tabId: string; body: string; initialName: string }
+    | { mode: "edit"; tabId: string; body: string; query: SavedQuery };
+  const [saveSheet, setSaveSheet] = useState<SaveSheetState | null>(null);
   const [showReview, setShowReview] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -256,6 +270,19 @@ export function App() {
         onSelect: () => setShowAdd(true),
       },
       {
+        id: "save-query",
+        title: "Save query",
+        subtitle: "Write through if already saved, else open Save",
+        kbd: "⌘S",
+        onSelect: () => onSave(),
+      },
+      {
+        id: "save-query-as",
+        title: "Save query as…",
+        kbd: "⇧⌘S",
+        onSelect: () => onSaveAs(),
+      },
+      {
         id: "manage-snippets",
         title: "Manage snippets…",
         onSelect: () => {
@@ -299,6 +326,97 @@ export function App() {
   const onPickTable = (schema: string, table: string) => {
     tabs.openOrSwitchTable(schema, table);
   };
+
+  // ── Library: open / save / delete ──────────────────────────────
+  // Opening a saved entry reuses an untouched scratch tab when possible —
+  // see useTabs.openLibraryQuery for the heuristic.
+  const onOpenSavedQuery = useCallback(
+    (q: SavedQuery) => {
+      tabs.openLibraryQuery({ id: q.id, name: q.name, body: q.body });
+    },
+    [tabs],
+  );
+
+  const onRunSavedQuery = useCallback(
+    (q: SavedQuery) => {
+      const id = tabs.openLibraryQuery({ id: q.id, name: q.name, body: q.body });
+      if (id) void runTabQuery(id, q.body);
+    },
+    [tabs, runTabQuery],
+  );
+
+  const onDeleteSavedQuery = useCallback(
+    async (q: SavedQuery) => {
+      try {
+        await savedQueries.remove(q.id);
+        tabs.unbindLibrary(q.id);
+        showToast(`Removed "${q.name}"`, "ok");
+      } catch (e) {
+        showToast(String(e), "err");
+      }
+    },
+    [savedQueries, tabs],
+  );
+
+  // ⌘S: write-through if the active tab is bound to a saved query (and the
+  // entry still exists); otherwise pop the save sheet as a fresh entry.
+  const onSave = useCallback(() => {
+    const tab = tabs.activeTab;
+    if (!tab) return;
+    if (tab.source === "library" && tab.libraryId) {
+      const existing = savedQueries.list.find((q) => q.id === tab.libraryId);
+      if (existing) {
+        void (async () => {
+          try {
+            const saved = await savedQueries.save({
+              id: existing.id,
+              name: existing.name,
+              body: tab.sql,
+              description: existing.description,
+              connection_name: existing.connection_name,
+            });
+            tabs.bindLibrary(tab.id, saved.id, saved.name, saved.body);
+            showToast(`Saved "${saved.name}"`, "ok");
+          } catch (e) {
+            showToast(String(e), "err");
+          }
+        })();
+        return;
+      }
+      // The library entry vanished out from under us — fall through to
+      // "Save as new".
+    }
+    setSaveSheet({
+      mode: "new",
+      tabId: tab.id,
+      body: tab.sql,
+      initialName: tab.title.startsWith("Query ") ? "" : tab.title,
+    });
+  }, [tabs, savedQueries]);
+
+  // ⌘⇧S: always opens the sheet — even when bound, the user wants to fork.
+  const onSaveAs = useCallback(() => {
+    const tab = tabs.activeTab;
+    if (!tab) return;
+    setSaveSheet({
+      mode: "new",
+      tabId: tab.id,
+      body: tab.sql,
+      initialName: tab.title.startsWith("Query ") ? "" : tab.title,
+    });
+  }, [tabs]);
+
+  // Bridge the File menu accelerators to the same handlers the in-editor
+  // shortcuts use. The native menu owns ⌘S / ⌘⇧S system-wide; the CodeMirror
+  // bindings stay as a fallback for the (rare) case the OS doesn't intercept.
+  useEffect(() => {
+    const p1 = listen("save-query", () => onSave());
+    const p2 = listen("save-query-as", () => onSaveAs());
+    return () => {
+      p1.then((u) => u()).catch(() => {});
+      p2.then((u) => u()).catch(() => {});
+    };
+  }, [onSave, onSaveAs]);
 
   // ── Post-connect sensitivity toast ────────────────────────────
   // Surfaces newly-suggested classifications so the user can review them.
@@ -359,6 +477,10 @@ export function App() {
           onPickTable={onPickTable}
           onReviewSensitivity={setSensitivityFor}
           openConnectionsRef={openConnectionsRef}
+          libraryEntries={savedQueries.list}
+          onOpenLibrary={onOpenSavedQuery}
+          onRunLibrary={onRunSavedQuery}
+          onDeleteLibrary={onDeleteSavedQuery}
         />
         <Splitter
           orientation="vertical"
@@ -393,6 +515,8 @@ export function App() {
           onAddTab={tabs.addScratchTab}
           onSqlChange={(id, sql) => tabs.setSql(id, sql)}
           onRun={runActive}
+          onSave={onSave}
+          onSaveAs={onSaveAs}
           onOpenMcpModal={() => setShowMcp(true)}
           editing={editing}
           reveal={reveal}
@@ -494,6 +618,27 @@ export function App() {
           }}
         />
       )}
+      {saveSheet && (
+        <SaveQuerySheet
+          existing={saveSheet.mode === "edit" ? saveSheet.query : null}
+          initialName={saveSheet.mode === "new" ? saveSheet.initialName : ""}
+          body={saveSheet.body}
+          connectionName={activeName}
+          existingNames={savedQueries.list.map((q) => ({ id: q.id, name: q.name }))}
+          onClose={() => setSaveSheet(null)}
+          onSubmit={async (input) => {
+            const saved = await savedQueries.save({
+              id: input.id,
+              name: input.name,
+              body: saveSheet.body,
+              description: input.description,
+              connection_name: input.connection_name,
+            });
+            tabs.bindLibrary(saveSheet.tabId, saved.id, saved.name, saved.body);
+            showToast(`Saved "${saved.name}"`, "ok");
+          }}
+        />
+      )}
       {sensitivityFor && (
         <SensitivityModal
           connection={sensitivityFor}
@@ -508,6 +653,8 @@ export function App() {
           commands={paletteCommands}
           onPickTable={onPickTable}
           onOpenSql={onPaletteOpenSql}
+          libraryEntries={savedQueries.list}
+          onOpenLibrary={onOpenSavedQuery}
         />
       )}
       <ToastHost />

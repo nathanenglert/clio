@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::types::{
-    Category, Classification, ClassificationStatus, Connection, NewConnectionInput, Snippet,
-    SnippetInput,
+    Category, Classification, ClassificationStatus, Connection, NewConnectionInput, SavedQuery,
+    SavedQueryInput, Snippet, SnippetInput,
 };
 
 const KEYRING_SERVICE: &str = "com.dbapp.poc";
@@ -160,6 +160,38 @@ pub async fn open_metadata() -> Result<SqlitePool> {
     .await?;
 
     seed_default_snippets(&pool).await?;
+
+    // Saved queries — named persistent SQL surfaced in the Library sidebar.
+    // Scope is encoded by connection_name: NULL = global; otherwise visible
+    // only when that connection is active. We don't FK to the connections row
+    // (scope is a name string, not an id) so renaming a connection won't
+    // cascade — that's intentional: scopes follow the display name.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS saved_queries (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            body            TEXT NOT NULL,
+            description     TEXT NOT NULL DEFAULT '',
+            connection_name TEXT NULL,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS saved_queries_name_idx
+             ON saved_queries (LOWER(name))",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS saved_queries_conn_idx
+             ON saved_queries (connection_name)",
+    )
+    .execute(&pool)
+    .await?;
 
     // Sensitivity classifications — per-column PHI / PCI / PII labels.
     // Keyed by (connection_id, schema, table, column). Status starts at
@@ -574,6 +606,132 @@ pub async fn delete_snippet(pool: &SqlitePool, id: &str) -> Result<()> {
         .execute(pool)
         .await
         .with_context(|| format!("delete snippet {id}"))?;
+    Ok(())
+}
+
+// ── Saved queries ────────────────────────────────────────────────
+
+const SAVED_QUERY_COLUMNS: &str =
+    "id, name, body, description, connection_name, created_at, updated_at";
+
+fn row_to_saved_query(r: &sqlx::sqlite::SqliteRow) -> SavedQuery {
+    SavedQuery {
+        id: r.get("id"),
+        name: r.get("name"),
+        body: r.get("body"),
+        description: r.get("description"),
+        connection_name: r.get("connection_name"),
+        created_at: r.get::<i64, _>("created_at"),
+        updated_at: r.get::<i64, _>("updated_at"),
+    }
+}
+
+/// Lists saved queries visible in the given scope. When `connection` is None,
+/// returns only globals. When Some, returns globals plus entries scoped to
+/// that connection. Always sorted by name (case-insensitive).
+pub async fn list_saved_queries(
+    pool: &SqlitePool,
+    connection: Option<&str>,
+) -> Result<Vec<SavedQuery>> {
+    let rows = match connection {
+        Some(name) => sqlx::query(&format!(
+            "SELECT {SAVED_QUERY_COLUMNS}
+               FROM saved_queries
+              WHERE connection_name IS NULL OR connection_name = ?1
+              ORDER BY LOWER(name)"
+        ))
+        .bind(name)
+        .fetch_all(pool)
+        .await
+        .with_context(|| "list saved queries (scoped)")?,
+        None => sqlx::query(&format!(
+            "SELECT {SAVED_QUERY_COLUMNS}
+               FROM saved_queries
+              WHERE connection_name IS NULL
+              ORDER BY LOWER(name)"
+        ))
+        .fetch_all(pool)
+        .await
+        .with_context(|| "list saved queries (global)")?,
+    };
+    Ok(rows.iter().map(row_to_saved_query).collect())
+}
+
+/// Insert or update a saved query. When `input.id` is None a fresh UUID is
+/// minted; when present the row is updated in place (created_at preserved).
+pub async fn upsert_saved_query(pool: &SqlitePool, input: SavedQueryInput) -> Result<SavedQuery> {
+    let name = input.name.trim().to_string();
+    let body = input.body;
+    let description = input.description;
+    let connection_name = input.connection_name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if name.is_empty() {
+        anyhow::bail!("name is required");
+    }
+    if body.trim().is_empty() {
+        anyhow::bail!("body is required");
+    }
+    let now = chrono::Utc::now().timestamp();
+    match input.id {
+        Some(id) => {
+            sqlx::query(
+                "UPDATE saved_queries
+                    SET name = ?2, body = ?3, description = ?4,
+                        connection_name = ?5, updated_at = ?6
+                  WHERE id = ?1",
+            )
+            .bind(&id)
+            .bind(&name)
+            .bind(&body)
+            .bind(&description)
+            .bind(&connection_name)
+            .bind(now)
+            .execute(pool)
+            .await
+            .with_context(|| format!("update saved query {id}"))?;
+            let r = sqlx::query(&format!(
+                "SELECT {SAVED_QUERY_COLUMNS} FROM saved_queries WHERE id = ?1"
+            ))
+            .bind(&id)
+            .fetch_one(pool)
+            .await
+            .with_context(|| format!("re-read saved query {id}"))?;
+            Ok(row_to_saved_query(&r))
+        }
+        None => {
+            let id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO saved_queries
+                    (id, name, body, description, connection_name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            )
+            .bind(&id)
+            .bind(&name)
+            .bind(&body)
+            .bind(&description)
+            .bind(&connection_name)
+            .bind(now)
+            .execute(pool)
+            .await
+            .with_context(|| format!("insert saved query {name}"))?;
+            Ok(SavedQuery {
+                id,
+                name,
+                body,
+                description,
+                connection_name,
+                created_at: now,
+                updated_at: now,
+            })
+        }
+    }
+}
+
+pub async fn delete_saved_query(pool: &SqlitePool, id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM saved_queries WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .with_context(|| format!("delete saved query {id}"))?;
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { QueryResult } from "./api";
 
-export type TabSource = "scratch" | "table" | "agent";
+export type TabSource = "scratch" | "table" | "agent" | "library";
 
 export type Tab = {
   id: string;
@@ -12,6 +12,8 @@ export type Tab = {
   agentAuthored: boolean;
   /** "schema.table" for table-sourced tabs — used to open-or-switch. */
   schemaTableKey?: string;
+  /** Saved-query id for library-sourced tabs — used to open-or-switch. */
+  libraryId?: string;
   // Runtime (not persisted)
   result: QueryResult | null;
   error: string | null;
@@ -49,7 +51,10 @@ function freshScratchTab(n: number): Tab {
   };
 }
 
-type PersistedTab = Pick<Tab, "id" | "title" | "sql" | "dirty" | "source" | "agentAuthored" | "schemaTableKey">;
+type PersistedTab = Pick<
+  Tab,
+  "id" | "title" | "sql" | "dirty" | "source" | "agentAuthored" | "schemaTableKey" | "libraryId"
+>;
 type PersistedConn = { tabs: PersistedTab[]; activeId: string | null; nextScratchN: number };
 type Persisted = Record<string, PersistedConn>;
 
@@ -93,6 +98,7 @@ function persist(state: State) {
         source: t.source,
         agentAuthored: t.agentAuthored,
         schemaTableKey: t.schemaTableKey,
+        libraryId: t.libraryId,
       })),
     };
   }
@@ -250,6 +256,102 @@ export function useTabs(connectionName: string | null) {
     [mutate],
   );
 
+  /**
+   * Open a saved query in a tab. If the same libraryId is already open we just
+   * focus it. If the active tab is an untouched scratch (still on its seed
+   * SQL, no edits, no result yet) we reuse it — opening a query shouldn't
+   * leave behind an empty "Query 1" tab on first interaction.
+   */
+  const openLibraryQuery = useCallback(
+    (entry: { id: string; name: string; body: string }) => {
+      let openedId: string | null = null;
+      mutate((c) => {
+        const existing = c.tabs.find((t) => t.libraryId === entry.id);
+        if (existing) {
+          openedId = existing.id;
+          return { ...c, activeId: existing.id };
+        }
+        const active = c.tabs.find((t) => t.id === c.activeId);
+        const reusable =
+          active &&
+          active.source === "scratch" &&
+          !active.dirty &&
+          active.result == null &&
+          active.error == null &&
+          active.sql === DEFAULT_SQL;
+        if (reusable && active) {
+          openedId = active.id;
+          return {
+            ...c,
+            tabs: c.tabs.map((t) =>
+              t.id === active.id
+                ? {
+                    ...t,
+                    title: entry.name,
+                    sql: entry.body,
+                    dirty: false,
+                    source: "library" as TabSource,
+                    libraryId: entry.id,
+                    result: null,
+                    error: null,
+                  }
+                : t,
+            ),
+          };
+        }
+        const tab: Tab = {
+          id: newId(),
+          title: entry.name,
+          sql: entry.body,
+          dirty: false,
+          source: "library",
+          libraryId: entry.id,
+          agentAuthored: false,
+          result: null,
+          error: null,
+          running: false,
+        };
+        openedId = tab.id;
+        return { ...c, tabs: [...c.tabs, tab], activeId: tab.id };
+      });
+      return openedId;
+    },
+    [mutate],
+  );
+
+  /**
+   * Update a saved tab in place to reflect a fresh save: clears `dirty`,
+   * stamps the (possibly renamed) title, and binds the libraryId on first
+   * save. Used by the ⌘S write-through and the Save-as flows.
+   */
+  const bindLibrary = useCallback(
+    (tabId: string, libraryId: string, name: string, body: string) => {
+      updateTab(tabId, {
+        source: "library",
+        libraryId,
+        title: name,
+        sql: body,
+        dirty: false,
+      });
+    },
+    [updateTab],
+  );
+
+  /** Detach a library binding (e.g. saved query was deleted while open). */
+  const unbindLibrary = useCallback(
+    (libraryId: string) => {
+      mutate((c) => ({
+        ...c,
+        tabs: c.tabs.map((t) =>
+          t.libraryId === libraryId
+            ? { ...t, source: "scratch" as TabSource, libraryId: undefined, dirty: true }
+            : t,
+        ),
+      }));
+    },
+    [mutate],
+  );
+
   const setSql = useCallback(
     (id: string, sql: string) => {
       updateTab(id, { sql, dirty: true });
@@ -266,6 +368,9 @@ export function useTabs(connectionName: string | null) {
     addScratchTab,
     addAgentTab,
     openOrSwitchTable,
+    openLibraryQuery,
+    bindLibrary,
+    unbindLibrary,
     setSql,
     updateTab,
   };

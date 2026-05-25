@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type ActivityEvent, type Connection, type TableSummary } from "../lib/api";
+import {
+  api,
+  type ActivityEvent,
+  type Connection,
+  type SavedQuery,
+  type TableSummary,
+} from "../lib/api";
 import { Modal } from "./Modal";
 
 export type CommandItem = {
@@ -17,6 +23,10 @@ type Props = {
   commands: CommandItem[];
   onPickTable: (schema: string, table: string) => void;
   onOpenSql: (sql: string, source: "ui" | "mcp") => void;
+  /** Saved queries in scope (globals + current-connection scoped). */
+  libraryEntries?: SavedQuery[];
+  /** Open a saved query in a tab. */
+  onOpenLibrary?: (q: SavedQuery) => void;
 };
 
 type Row = {
@@ -29,10 +39,11 @@ type Row = {
   onSelect: () => void;
 };
 
-type GroupKey = "tables" | "recents" | "commands";
+type GroupKey = "tables" | "library" | "recents" | "commands";
 
 const GROUP_LABEL: Record<GroupKey, string> = {
   tables: "Tables",
+  library: "Library",
   recents: "Recent queries",
   commands: "Commands",
 };
@@ -59,6 +70,8 @@ export function CommandPalette({
   commands,
   onPickTable,
   onOpenSql,
+  libraryEntries,
+  onOpenLibrary,
 }: Props) {
   const [query, setQuery] = useState("");
   const [tables, setTables] = useState<Array<{ schema: string; table: string; kind: TableSummary["kind"]; row_estimate?: number }>>([]);
@@ -127,6 +140,26 @@ export function CommandPalette({
       out.push(...matchedTables);
     }
 
+    if (libraryEntries && onOpenLibrary) {
+      const matchedLibrary = libraryEntries
+        .filter((e) => {
+          if (!q) return false; // mirror "tables" — only after typing
+          return (
+            e.name.toLowerCase().includes(q) ||
+            e.description.toLowerCase().includes(q)
+          );
+        })
+        .slice(0, 8)
+        .map<Row>((e) => ({
+          group: GROUP_LABEL.library,
+          title: e.name,
+          subtitle: e.description || (e.connection_name ? `scoped to ${e.connection_name}` : "global"),
+          kbd: e.connection_name === null ? "global" : undefined,
+          onSelect: () => onOpenLibrary(e),
+        }));
+      out.push(...matchedLibrary);
+    }
+
     const seen = new Set<string>();
     const matchedRecents = recentQueries
       .filter((e) => !!e.payload)
@@ -165,7 +198,17 @@ export function CommandPalette({
     out.push(...matchedCommands);
 
     return out;
-  }, [query, connection?.connected, tables, recentQueries, commands, onPickTable, onOpenSql]);
+  }, [
+    query,
+    connection?.connected,
+    tables,
+    recentQueries,
+    commands,
+    onPickTable,
+    onOpenSql,
+    libraryEntries,
+    onOpenLibrary,
+  ]);
 
   // Clamp focus when the visible row count changes.
   useEffect(() => {
