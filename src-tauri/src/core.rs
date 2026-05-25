@@ -8,6 +8,7 @@ use crate::pool::PoolRegistry;
 mod export;
 mod lifecycle;
 mod mutations;
+pub(crate) mod policy;
 mod query;
 pub(crate) mod redactor;
 mod saved_queries;
