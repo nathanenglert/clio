@@ -2,7 +2,10 @@ use anyhow::Result;
 use sqlx::Row;
 use std::time::Instant;
 
-use crate::types::{ColumnDescription, ColumnSearchHit, TableKind, TableSummary};
+use crate::types::{
+    ColumnDescription, ColumnSearchHit, ConstraintInfo, ConstraintKind, ForeignKeyTarget,
+    IndexInfo, TableDescription, TableKind, TableSummary, TriggerInfo, ViewDefinition,
+};
 
 use super::Core;
 
@@ -123,11 +126,35 @@ pub async fn describe_table(
     conn: &str,
     schema: &str,
     table: &str,
-) -> Result<Vec<ColumnDescription>> {
+) -> Result<TableDescription> {
     let started = Instant::now();
     let r = async {
         let pool = core.pools.ensure(&core.meta, conn).await?;
-        let rows = sqlx::query(
+
+        // ── relkind first ─────────────────────────────────────────
+        // We need it to decide whether to fetch a view definition and to
+        // include it in the response shape. One round-trip; cheap.
+        let relkind_char: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT c.relkind::text
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1 AND c.relname = $2
+            "#,
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_optional(&pool)
+        .await?;
+        let kind = TableKind::from_relkind(
+            relkind_char
+                .as_deref()
+                .and_then(|s| s.chars().next())
+                .unwrap_or('r'),
+        );
+
+        // ── columns ───────────────────────────────────────────────
+        let column_rows = sqlx::query(
             r#"
             SELECT
                 c.column_name,
@@ -163,7 +190,7 @@ pub async fn describe_table(
         .bind(table)
         .fetch_all(&pool)
         .await?;
-        let out = rows
+        let columns: Vec<ColumnDescription> = column_rows
             .into_iter()
             .map(|r| ColumnDescription {
                 name: r.get("column_name"),
@@ -176,7 +203,47 @@ pub async fn describe_table(
                 enum_values: r.try_get::<Option<Vec<String>>, _>("enum_values").ok().flatten(),
             })
             .collect();
-        Ok::<_, anyhow::Error>(out)
+
+        // Views & matviews don't have indexes/constraints/triggers in the
+        // sense the UI cares about, and matview index queries against a
+        // matview *do* return results (CREATE INDEX ON matview is legal),
+        // so we still query — pg returns the empty set for plain views.
+        let indexes = fetch_indexes(&pool, schema, table).await?;
+        let constraints = fetch_constraints(&pool, schema, table).await?;
+        let triggers = fetch_triggers(&pool, schema, table).await?;
+
+        // ── view definition ───────────────────────────────────────
+        let view_definition = match kind {
+            TableKind::View | TableKind::MatView => {
+                let sql: Option<String> = sqlx::query_scalar(
+                    r#"
+                    SELECT pg_get_viewdef(c.oid, true)
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = $1 AND c.relname = $2
+                    "#,
+                )
+                .bind(schema)
+                .bind(table)
+                .fetch_optional(&pool)
+                .await?
+                .flatten();
+                sql.map(|s| ViewDefinition {
+                    sql: s.trim_end().to_string(),
+                    is_materialized: matches!(kind, TableKind::MatView),
+                })
+            }
+            _ => None,
+        };
+
+        Ok::<_, anyhow::Error>(TableDescription {
+            kind,
+            columns,
+            indexes,
+            constraints,
+            triggers,
+            view_definition,
+        })
     }
     .await;
     core.record_ok(
@@ -186,4 +253,213 @@ pub async fn describe_table(
         &r,
     );
     r
+}
+
+async fn fetch_indexes(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<IndexInfo>> {
+    // pg_get_indexdef gives us the authoritative CREATE INDEX text (handles
+    // partial WHERE, expressions, opclasses). We pull column names via the
+    // attribute join so the UI can render them tidily without re-parsing the
+    // definition string.
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            i.relname AS index_name,
+            pg_get_indexdef(ix.indexrelid) AS def,
+            ix.indisunique AS is_unique,
+            ix.indisprimary AS is_primary,
+            COALESCE(
+                (
+                    SELECT array_agg(att.attname::text ORDER BY ord.k)
+                    FROM unnest(ix.indkey::int[]) WITH ORDINALITY ord(attnum, k)
+                    LEFT JOIN pg_attribute att
+                      ON att.attrelid = ix.indrelid AND att.attnum = ord.attnum
+                ),
+                ARRAY[]::text[]
+            ) AS columns
+        FROM pg_index ix
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = $1 AND t.relname = $2
+        ORDER BY ix.indisprimary DESC, ix.indisunique DESC, i.relname
+        "#,
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            // attname is NULL for expression indexes; surface "(expression)"
+            // so the columns list is never empty when one exists.
+            let raw_cols: Vec<Option<String>> = r
+                .try_get::<Vec<Option<String>>, _>("columns")
+                .unwrap_or_default();
+            let columns = raw_cols
+                .into_iter()
+                .map(|c| c.unwrap_or_else(|| "(expression)".to_string()))
+                .collect();
+            IndexInfo {
+                name: r.get("index_name"),
+                definition: r.get("def"),
+                is_unique: r.get("is_unique"),
+                is_primary: r.get("is_primary"),
+                columns,
+            }
+        })
+        .collect())
+}
+
+async fn fetch_constraints(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ConstraintInfo>> {
+    // pg_get_constraintdef hands us a uniform definition string per constraint
+    // type. For foreign keys we additionally resolve the referenced relation
+    // + columns so the UI can render "→ public.providers(id)" without parsing
+    // the SQL text.
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            con.conname AS name,
+            con.contype::text AS contype,
+            pg_get_constraintdef(con.oid, true) AS def,
+            COALESCE(
+                (
+                    SELECT array_agg(att.attname::text ORDER BY ord.k)
+                    FROM unnest(con.conkey::int[]) WITH ORDINALITY ord(attnum, k)
+                    LEFT JOIN pg_attribute att
+                      ON att.attrelid = con.conrelid AND att.attnum = ord.attnum
+                ),
+                ARRAY[]::text[]
+            ) AS columns,
+            fn.nspname AS f_schema,
+            ft.relname AS f_table,
+            COALESCE(
+                (
+                    SELECT array_agg(fatt.attname::text ORDER BY ord.k)
+                    FROM unnest(con.confkey::int[]) WITH ORDINALITY ord(attnum, k)
+                    LEFT JOIN pg_attribute fatt
+                      ON fatt.attrelid = con.confrelid AND fatt.attnum = ord.attnum
+                ),
+                NULL
+            ) AS f_columns
+        FROM pg_constraint con
+        JOIN pg_class c ON c.oid = con.conrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN pg_class ft ON ft.oid = con.confrelid
+        LEFT JOIN pg_namespace fn ON fn.oid = ft.relnamespace
+        WHERE n.nspname = $1 AND c.relname = $2
+          AND con.contype IN ('p','f','u','c','x')
+        ORDER BY
+            CASE con.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'f' THEN 2
+                             WHEN 'c' THEN 3 WHEN 'x' THEN 4 ELSE 5 END,
+            con.conname
+        "#,
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let contype: String = r.get("contype");
+            let kind = ConstraintKind::from_contype(contype.chars().next().unwrap_or('?'))?;
+            let raw_cols: Vec<Option<String>> = r
+                .try_get::<Vec<Option<String>>, _>("columns")
+                .unwrap_or_default();
+            let columns = raw_cols.into_iter().flatten().collect();
+            let references = match kind {
+                ConstraintKind::ForeignKey => {
+                    let f_schema: Option<String> = r.try_get("f_schema").ok();
+                    let f_table: Option<String> = r.try_get("f_table").ok();
+                    let f_columns: Option<Vec<Option<String>>> =
+                        r.try_get::<Option<Vec<Option<String>>>, _>("f_columns").ok().flatten();
+                    match (f_schema, f_table, f_columns) {
+                        (Some(s), Some(t), Some(cs)) => Some(ForeignKeyTarget {
+                            schema: s,
+                            table: t,
+                            columns: cs.into_iter().flatten().collect(),
+                        }),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            Some(ConstraintInfo {
+                name: r.get("name"),
+                kind,
+                definition: r.get("def"),
+                columns,
+                references,
+            })
+        })
+        .collect())
+}
+
+async fn fetch_triggers(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<TriggerInfo>> {
+    // `tgisinternal` excludes triggers Postgres synthesizes for FK
+    // constraints — those are a noisy multiple of the user's actual triggers
+    // and the user already sees the FK in the Constraints tab.
+    //
+    // tgtype is a bitmask: bit 1 = ROW (vs STATEMENT); bit 2 = BEFORE; bit 6 =
+    // INSTEAD OF; bits 3/4/5 = INSERT/DELETE/UPDATE; bit 7 = TRUNCATE.
+    // See: src/include/catalog/pg_trigger.h (TRIGGER_TYPE_*).
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            t.tgname AS name,
+            t.tgtype::int AS tgtype,
+            pg_get_triggerdef(t.oid, true) AS def
+        FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relname = $2
+          AND NOT t.tgisinternal
+        ORDER BY t.tgname
+        "#,
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let bits: i32 = r.get("tgtype");
+            let row_level = (bits & 1) != 0;
+            let before = (bits & 2) != 0;
+            let instead = (bits & 64) != 0;
+            let timing = if instead {
+                "INSTEAD OF"
+            } else if before {
+                "BEFORE"
+            } else {
+                "AFTER"
+            };
+            let mut events = Vec::new();
+            if (bits & 4) != 0 { events.push("INSERT"); }
+            if (bits & 8) != 0 { events.push("DELETE"); }
+            if (bits & 16) != 0 { events.push("UPDATE"); }
+            if (bits & 32) != 0 { events.push("TRUNCATE"); }
+            TriggerInfo {
+                name: r.get("name"),
+                timing: timing.to_string(),
+                events: events.join(", "),
+                level: if row_level { "ROW" } else { "STATEMENT" }.to_string(),
+                definition: r.get("def"),
+            }
+        })
+        .collect())
 }

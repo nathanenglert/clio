@@ -132,7 +132,7 @@ impl McpServer {
         ok_json(r)
     }
 
-    #[tool(description = "Describe a table: columns with data types, nullability, defaults, primary-key membership.")]
+    #[tool(description = "Describe a relation. Returns: `kind` (table|view|matview|partitioned|foreign), `columns` (name/data_type/is_nullable/default/is_primary_key/enum_values), `indexes` (name/definition/is_unique/is_primary/columns), `constraints` (name/kind=primary_key|foreign_key|unique|check|exclusion, definition, columns, references for FK), `triggers` (name/timing/events/level/definition; FK-synthesized triggers excluded), and `view_definition` (sql + is_materialized) when the relation is a view or matview.")]
     async fn describe_table(
         &self,
         Parameters(TableArg {

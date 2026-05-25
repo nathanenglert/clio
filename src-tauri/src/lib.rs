@@ -81,7 +81,7 @@ async fn describe_table(
     connection: String,
     schema: String,
     table: String,
-) -> Result<Vec<ColumnDescription>, String> {
+) -> Result<TableDescription, String> {
     core::describe_table(&state, &connection, &schema, &table)
         .await
         .map_err(format_err)
