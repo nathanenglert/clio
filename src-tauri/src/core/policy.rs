@@ -70,8 +70,9 @@ impl StmtKind {
 /// A schema-qualified target (e.g. `public.users`). `schema` is `None` when
 /// the SQL didn't qualify the name; in that case the rule matcher treats it
 /// as matching any schema pattern.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Target {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub name: String,
 }

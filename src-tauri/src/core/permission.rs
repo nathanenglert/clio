@@ -1,0 +1,187 @@
+//! Pending-permission registry.
+//!
+//! When `execute_statement` evaluates a statement and the policy says
+//! `Prompt`, the call registers a oneshot here, emits a `permission_required`
+//! activity event with the request payload, and awaits on the receiver. The
+//! UI's `resolve_permission` Tauri command sends the verdict in.
+//!
+//! The registry is shared via `Core::pending_permissions` so the same handle
+//! is reachable from both the MCP tool entrypoint and the Tauri command.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{oneshot, Mutex};
+
+use serde::{Deserialize, Serialize};
+
+use super::policy::Target;
+
+/// Payload pushed over the activity stream when a statement needs human
+/// approval. Fields are flat strings so the frontend can render without
+/// knowing about the Rust types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionRequest {
+    pub id: String,
+    pub source: String,
+    pub sql: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    /// Lowercased op category: `read | write | ddl | destruct`.
+    pub op_kind: String,
+    /// Lowercased statement kind: `select | update | drop_table | …`.
+    pub stmt_kind: String,
+    pub targets: Vec<Target>,
+    /// Label of the policy rule that fired (empty for the no-match fallback).
+    pub rule_label: String,
+    /// Human-readable reason for the prompt, surfaced on the card.
+    pub reason: String,
+    /// Best-effort row estimate from `EXPLAIN`. `None` when EXPLAIN failed
+    /// (e.g. DDL) or wasn't applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_estimate: Option<u64>,
+}
+
+/// Verdict the UI sends back via `resolve_permission`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PermissionVerdict {
+    Allow,
+    Deny,
+    /// User edited the SQL before approving. The new SQL runs instead of the
+    /// agent's original. Phase 2 trusts the modified SQL as-is; re-running
+    /// policy on it is a Phase 3+ decision.
+    Modified { sql: String },
+}
+
+/// In-memory map of `request_id → oneshot::Sender`. Default `Clone`
+/// shares the same backing map so the UI command and the MCP tool see the
+/// same pending list.
+#[derive(Default, Clone)]
+pub struct PendingPermissions {
+    inner: Arc<Mutex<HashMap<String, oneshot::Sender<PermissionVerdict>>>>,
+}
+
+impl PendingPermissions {
+    /// Register a pending request and get back its id + the receiver to
+    /// await on. Caller is responsible for emitting the activity event with
+    /// the id so the UI can reference it on resolve.
+    pub async fn register(&self) -> (String, oneshot::Receiver<PermissionVerdict>) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.inner.lock().await.insert(id.clone(), tx);
+        (id, rx)
+    }
+
+    /// Deliver a verdict for a previously-registered id. Errors if the id
+    /// is unknown (already resolved or never existed) or if the requester
+    /// dropped its receiver before we could send.
+    pub async fn resolve(&self, id: &str, verdict: PermissionVerdict) -> Result<(), String> {
+        let tx = self
+            .inner
+            .lock()
+            .await
+            .remove(id)
+            .ok_or_else(|| format!("no pending permission with id {id}"))?;
+        tx.send(verdict)
+            .map_err(|_| "permission requester is gone".to_string())?;
+        Ok(())
+    }
+
+    /// Drop a request without resolving it (e.g. requester disconnected).
+    /// Safe to call with an unknown id — no-op in that case.
+    #[allow(dead_code)]
+    pub async fn cancel(&self, id: &str) {
+        let _ = self.inner.lock().await.remove(id);
+    }
+
+    /// How many requests are currently outstanding. Useful for the status
+    /// bar's "N pending" indicator in Phase 3+; cheap so we expose it now.
+    #[allow(dead_code)]
+    pub async fn len(&self) -> usize {
+        self.inner.lock().await.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn register_then_resolve_delivers_verdict() {
+        let pending = PendingPermissions::default();
+        let (id, rx) = pending.register().await;
+        let p2 = pending.clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            p2.resolve(&id2, PermissionVerdict::Allow).await.unwrap();
+        });
+        match rx.await.unwrap() {
+            PermissionVerdict::Allow => {}
+            v => panic!("expected Allow, got {v:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_modified_carries_sql() {
+        let pending = PendingPermissions::default();
+        let (id, rx) = pending.register().await;
+        pending
+            .resolve(
+                &id,
+                PermissionVerdict::Modified {
+                    sql: "SELECT 1".into(),
+                },
+            )
+            .await
+            .unwrap();
+        match rx.await.unwrap() {
+            PermissionVerdict::Modified { sql } => assert_eq!(sql, "SELECT 1"),
+            v => panic!("expected Modified, got {v:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_unknown_id_errors() {
+        let pending = PendingPermissions::default();
+        let err = pending
+            .resolve("not-a-real-id", PermissionVerdict::Allow)
+            .await
+            .unwrap_err();
+        assert!(err.contains("not-a-real-id"));
+    }
+
+    #[tokio::test]
+    async fn double_resolve_errors() {
+        let pending = PendingPermissions::default();
+        let (id, _rx) = pending.register().await;
+        pending
+            .resolve(&id, PermissionVerdict::Allow)
+            .await
+            .unwrap();
+        assert!(pending
+            .resolve(&id, PermissionVerdict::Allow)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn cancel_removes_request() {
+        let pending = PendingPermissions::default();
+        let (id, _rx) = pending.register().await;
+        assert_eq!(pending.len().await, 1);
+        pending.cancel(&id).await;
+        assert_eq!(pending.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn deny_dropped_receiver_errors_on_send() {
+        let pending = PendingPermissions::default();
+        let (id, rx) = pending.register().await;
+        drop(rx);
+        let err = pending
+            .resolve(&id, PermissionVerdict::Allow)
+            .await
+            .unwrap_err();
+        assert!(err.contains("requester is gone"));
+    }
+}

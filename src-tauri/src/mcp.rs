@@ -50,6 +50,20 @@ pub struct ProposeQueryArg {
     pub title: Option<String>,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ExecuteStatementArg {
+    /// Connection name as it appears in the workbench.
+    pub connection: String,
+    /// Any SQL statement. Read statements that pass policy run immediately;
+    /// writes/DDL go through the permission gate (human approves before run).
+    pub sql: String,
+    /// Optional plain-English description of what the agent intends. Shown on
+    /// the permission card so the human sees the agent's reasoning, not just
+    /// the SQL.
+    #[serde(default)]
+    pub intent: Option<String>,
+}
+
 /// Cap full-text payloads (e.g. SQL) emitted on activity events so a long
 /// statement can't blow the socket reader's line buffer. Mirrors
 /// core::query::cap_payload — duplicated here because that helper is
@@ -178,6 +192,21 @@ impl McpServer {
             .record_ok_with_payload("propose_query", detail.clone(), payload, started, &result);
         ok_json(serde_json::json!({ "proposed": true, "title": detail }))
     }
+
+    #[tool(description = "Run a SQL statement (any kind — SELECT/INSERT/UPDATE/DELETE/DDL) through the workbench's permission gate. Reads inside the policy run immediately. Writes/DDL pause and ask the human via a permission card; the human can allow, deny, or modify the SQL before running. Returns rows on success (empty rows + empty columns for writes/DDL without RETURNING). Pass `intent` to surface a plain-English description on the card. Distinct from `propose_query`: that opens a tab for review and never runs; this is for the agent's own gated execution.")]
+    async fn execute_statement(
+        &self,
+        Parameters(ExecuteStatementArg {
+            connection,
+            sql,
+            intent,
+        }): Parameters<ExecuteStatementArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let r = core::execute_statement(&self.core, &connection, &sql, intent.as_deref())
+            .await
+            .map_err(err)?;
+        ok_json(r)
+    }
 }
 
 #[tool_handler]
@@ -190,7 +219,7 @@ impl ServerHandler for McpServer {
         )
         .with_server_info(Implementation::from_build_env())
         .with_instructions(
-            "Postgres workbench MCP server. Tools: list_connections, connect, list_schemas, list_tables, describe_table, run_query, propose_query. All schema/query tools require a `connection` arg matching a name from list_connections. Reads only — writes/DDL rejected. Use `propose_query` to surface a SQL statement to the human for review (opens a new editor tab; does not auto-run).",
+            "Postgres workbench MCP server. Tools: list_connections, connect, list_schemas, list_tables, describe_table, run_query, propose_query, execute_statement. All schema/query tools require a `connection` arg matching a name from list_connections. `run_query` is SELECT-only and never prompts. `propose_query` opens a tab for human review (does not run). `execute_statement` is the gated runner — reads run immediately if policy allows, writes/DDL pause for human approval via a permission card.",
         )
     }
 }

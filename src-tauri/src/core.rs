@@ -5,9 +5,11 @@ use std::time::Instant;
 use crate::activity::{record, record_with_payload, EmitFn};
 use crate::pool::PoolRegistry;
 
+mod execute;
 mod export;
 mod lifecycle;
 mod mutations;
+pub(crate) mod permission;
 pub(crate) mod policy;
 mod query;
 pub(crate) mod redactor;
@@ -16,6 +18,7 @@ mod schema;
 mod sensitivity;
 mod snippets;
 
+pub use execute::execute_statement;
 pub use export::{export_query, write_file};
 pub use lifecycle::{add_connection, connect, delete_connection, disconnect, list_connections};
 pub use mutations::apply_mutations;
@@ -25,6 +28,7 @@ pub use schema::{describe_table, list_schemas, list_tables, search_columns};
 pub use sensitivity::{classify_schema, list_classifications, update_classification};
 pub use snippets::{delete_snippet, list_snippets, upsert_snippet};
 
+use permission::PendingPermissions;
 use redactor::RedactorCache;
 
 /// Container the UI- and MCP-mode entry points both hand to core fns.
@@ -37,6 +41,10 @@ pub struct Core {
     /// Lazy-built cache of `(table_oid, attnum) → Category` per connection.
     /// Invalidated by `update_classification` and connection drop.
     pub(crate) redactor_cache: RedactorCache,
+    /// Pending permission requests awaiting a UI verdict. Populated by
+    /// `execute_statement` when a Prompt verdict fires; drained by the
+    /// `resolve_permission` Tauri command.
+    pub(crate) pending_permissions: PendingPermissions,
 }
 
 impl Core {

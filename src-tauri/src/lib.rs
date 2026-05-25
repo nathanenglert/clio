@@ -172,6 +172,23 @@ async fn update_classification(
         .map_err(format_err)
 }
 
+/// Frontend → backend channel for resolving a pending permission request.
+/// `id` is the request id from the `permission_required` activity event.
+/// `verdict` is one of:
+///   `{ "kind": "allow" }`
+///   `{ "kind": "deny" }`
+///   `{ "kind": "modified", "sql": "..." }`
+/// Errors if no pending request matches the id, or if the requester (the
+/// `execute_statement` call awaiting on the oneshot) is no longer listening.
+#[tauri::command]
+async fn resolve_permission(
+    state: State<'_, Core>,
+    id: String,
+    verdict: core::permission::PermissionVerdict,
+) -> Result<(), String> {
+    state.pending_permissions.resolve(&id, verdict).await
+}
+
 /// Set the reveal-sensitive toggle state. Updates the View menu's checkmark
 /// and emits the `reveal-sensitive` event, mirroring what the native menu
 /// item does. Called from the command palette so the toggle is reachable
@@ -517,6 +534,7 @@ pub fn run() {
                     emit,
                     source: "ui".into(),
                     redactor_cache: Default::default(),
+                    pending_permissions: Default::default(),
                 }
             });
             handle.manage(core);
@@ -548,6 +566,7 @@ pub fn run() {
             list_classifications,
             update_classification,
             set_reveal_sensitive,
+            resolve_permission,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -567,6 +586,7 @@ pub fn run_mcp() {
             emit: mcp_emitter(),
             source: "mcp".into(),
             redactor_cache: Default::default(),
+            pending_permissions: Default::default(),
         };
         let server = mcp::McpServer::new(core);
         let service = match server.serve(stdio()).await {
