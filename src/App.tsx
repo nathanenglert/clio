@@ -17,6 +17,7 @@ import { AgentSurface } from "./components/AgentSurface";
 import { PermissionCard } from "./components/PermissionCard";
 import { BulkMigrationCard } from "./components/BulkMigrationCard";
 import { PolicyModal } from "./components/PolicyModal";
+import { ShortcutsOverlay } from "./components/ShortcutsOverlay";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 import { PendingTray } from "./components/PendingTray";
@@ -52,6 +53,7 @@ export function App() {
   const [pendingMigration, setPendingMigration] =
     useState<MigrationRequest | null>(null);
   const [policyOpen, setPolicyOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   // Bridge from the once-mounted activity listener (closure capture) to the
   // live `tabs` API — populated below after useTabs runs. Used so
@@ -275,13 +277,31 @@ export function App() {
   }, []);
 
   // ⌘⇧. opens the policy viewer (design/README.md §"Keyboard shortcuts ·
-  // Agent"). Toggle behavior matches ⌘K.
+  // Agent"). Toggle behavior matches ⌘K. Note: with shift held on US
+  // keyboards, e.key is ">" — not ".". We match either so the binding fires
+  // regardless of which event Webkit hands us.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === ".") {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === "." || e.key === ">")) {
         e.preventDefault();
         setPolicyOpen((v) => !v);
       }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // `?` opens the keyboard shortcuts overlay (design/screenshots/31).
+  // Suppress when focus is inside an input/textarea so typing `?` in the
+  // schema filter or SQL editor doesn't summon the overlay.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "?") return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || t?.isContentEditable) return;
+      e.preventDefault();
+      setShortcutsOpen((v) => !v);
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -344,6 +364,19 @@ export function App() {
         title: "MCP config…",
         subtitle: "Connect this workbench to an AI agent",
         onSelect: () => setShowMcp(true),
+      },
+      {
+        id: "view-policy",
+        title: "View policy rules",
+        subtitle: "What the permission gate is enforcing",
+        kbd: "⌘⇧.",
+        onSelect: () => setPolicyOpen(true),
+      },
+      {
+        id: "view-shortcuts",
+        title: "Keyboard shortcuts",
+        kbd: "?",
+        onSelect: () => setShortcutsOpen(true),
       },
     ];
     if (active?.connected) {
@@ -707,6 +740,9 @@ export function App() {
           connection={activeName}
           onClose={() => setPolicyOpen(false)}
         />
+      )}
+      {shortcutsOpen && (
+        <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />
       )}
       {snippetsModalOpen && (
         <SnippetsModal
