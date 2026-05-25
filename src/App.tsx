@@ -6,6 +6,8 @@ import {
   onActivity,
   type ActivityEvent,
   type Connection,
+  type MigrationRequest,
+  type MigrationVerdict,
   type PermissionRequest,
   type PermissionVerdict,
 } from "./lib/api";
@@ -13,6 +15,7 @@ import { SchemaTree } from "./components/SchemaTree";
 import { Workspace } from "./components/Workspace";
 import { AgentSurface } from "./components/AgentSurface";
 import { PermissionCard } from "./components/PermissionCard";
+import { BulkMigrationCard } from "./components/BulkMigrationCard";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 import { PendingTray } from "./components/PendingTray";
@@ -45,6 +48,8 @@ export function App() {
   // requests replace the visible one; Phase 4 (bulk migration) revisits.
   const [pendingPermission, setPendingPermission] =
     useState<PermissionRequest | null>(null);
+  const [pendingMigration, setPendingMigration] =
+    useState<MigrationRequest | null>(null);
 
   // Bridge from the once-mounted activity listener (closure capture) to the
   // live `tabs` API — populated below after useTabs runs. Used so
@@ -83,6 +88,14 @@ export function App() {
           setPendingPermission(req);
         } catch (parseErr) {
           console.error("permission_required: bad payload", parseErr);
+        }
+      }
+      if (e.tool === "migration_required" && e.payload) {
+        try {
+          const req = JSON.parse(e.payload) as MigrationRequest;
+          setPendingMigration(req);
+        } catch (parseErr) {
+          console.error("migration_required: bad payload", parseErr);
         }
       }
       if (e.tool === "propose_query" && e.source === "mcp" && e.payload) {
@@ -549,7 +562,7 @@ export function App() {
           }}
         />
       </div>
-      {pendingPermission && (
+      {pendingPermission ? (
         <PermissionCard
           request={pendingPermission}
           onResolve={async (verdict: PermissionVerdict) => {
@@ -562,18 +575,34 @@ export function App() {
                 <span>Couldn&apos;t resolve permission: {String(err)}</span>,
                 "err",
               );
-              // Restore the card so the user can retry.
               setPendingPermission(req);
             }
           }}
         />
-      )}
+      ) : pendingMigration ? (
+        <BulkMigrationCard
+          request={pendingMigration}
+          onResolve={async (verdict: MigrationVerdict) => {
+            const req = pendingMigration;
+            setPendingMigration(null);
+            try {
+              await api.resolve_migration(req.id, verdict);
+            } catch (err) {
+              showToast(
+                <span>Couldn&apos;t resolve migration: {String(err)}</span>,
+                "err",
+              );
+              setPendingMigration(req);
+            }
+          }}
+        />
+      ) : null}
       <AgentSurface
         events={agentEvents}
         recentQueries={recentQueries}
         onOpenSql={onAgentOpen}
         onRerunSql={onAgentRerun}
-        awaiting={!!pendingPermission}
+        awaiting={!!pendingPermission || !!pendingMigration}
       />
       {hasTrayWork && trayBatch && trayTab && (
         <div className="tray-region">

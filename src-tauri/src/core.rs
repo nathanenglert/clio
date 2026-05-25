@@ -18,7 +18,7 @@ mod schema;
 mod sensitivity;
 mod snippets;
 
-pub use execute::execute_statement;
+pub use execute::{execute_migration, execute_statement};
 pub use export::{export_query, write_file};
 pub use lifecycle::{add_connection, connect, delete_connection, disconnect, list_connections};
 pub use mutations::apply_mutations;
@@ -28,7 +28,7 @@ pub use schema::{describe_table, list_schemas, list_tables, search_columns};
 pub use sensitivity::{classify_schema, list_classifications, update_classification};
 pub use snippets::{delete_snippet, list_snippets, upsert_snippet};
 
-use permission::PendingPermissions;
+use permission::{PendingMigrations, PendingPermissions};
 use redactor::RedactorCache;
 
 /// Container the UI- and MCP-mode entry points both hand to core fns.
@@ -45,6 +45,9 @@ pub struct Core {
     /// `execute_statement` when a Prompt verdict fires; drained by the
     /// `resolve_permission` Tauri command.
     pub(crate) pending_permissions: PendingPermissions,
+    /// Pending bulk migrations awaiting a UI verdict. Populated by
+    /// `execute_migration`; drained by the `resolve_migration` Tauri command.
+    pub(crate) pending_migrations: PendingMigrations,
 }
 
 impl Core {

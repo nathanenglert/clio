@@ -64,6 +64,20 @@ pub struct ExecuteStatementArg {
     pub intent: Option<String>,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ExecuteMigrationArg {
+    /// Connection name as it appears in the workbench.
+    pub connection: String,
+    /// Each entry MUST be a single SQL statement. The workbench classifies
+    /// the whole batch up front, shows the human a numbered plan, and only
+    /// runs it after they approve. Deviations pause one-by-one during
+    /// execution via the standard permission card.
+    pub statements: Vec<String>,
+    /// Optional plain-English description of the migration's purpose.
+    #[serde(default)]
+    pub intent: Option<String>,
+}
+
 /// Cap full-text payloads (e.g. SQL) emitted on activity events so a long
 /// statement can't blow the socket reader's line buffer. Mirrors
 /// core::query::cap_payload — duplicated here because that helper is
@@ -207,6 +221,22 @@ impl McpServer {
             .map_err(err)?;
         ok_json(r)
     }
+
+    #[tool(description = "Run a multi-statement migration through the workbench's bulk permission gate. The full plan (numbered, with policy verdicts per statement) is shown to the human; they approve once with a transaction-wrap toggle, then each deviation pauses one-by-one for individual approval. Any denial or runtime error rolls back the whole batch when transactions are enabled (default). Each entry in `statements` MUST be exactly one SQL statement. Pass `intent` to describe the migration's purpose on the bulk card.")]
+    async fn execute_migration(
+        &self,
+        Parameters(ExecuteMigrationArg {
+            connection,
+            statements,
+            intent,
+        }): Parameters<ExecuteMigrationArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let r =
+            core::execute_migration(&self.core, &connection, statements, intent.as_deref())
+                .await
+                .map_err(err)?;
+        ok_json(r)
+    }
 }
 
 #[tool_handler]
@@ -219,7 +249,7 @@ impl ServerHandler for McpServer {
         )
         .with_server_info(Implementation::from_build_env())
         .with_instructions(
-            "Postgres workbench MCP server. Tools: list_connections, connect, list_schemas, list_tables, describe_table, run_query, propose_query, execute_statement. All schema/query tools require a `connection` arg matching a name from list_connections. `run_query` is SELECT-only and never prompts. `propose_query` opens a tab for human review (does not run). `execute_statement` is the gated runner — reads run immediately if policy allows, writes/DDL pause for human approval via a permission card.",
+            "Postgres workbench MCP server. Tools: list_connections, connect, list_schemas, list_tables, describe_table, run_query, propose_query, execute_statement, execute_migration. All schema/query tools require a `connection` arg matching a name from list_connections. `run_query` is SELECT-only and never prompts. `propose_query` opens a tab for human review (does not run). `execute_statement` is the gated runner for a single statement — reads run immediately if policy allows, writes/DDL pause for human approval. `execute_migration` is the bulk variant — show the plan, approve once, runs in a transaction with per-deviation prompts.",
         )
     }
 }

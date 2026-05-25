@@ -9,7 +9,9 @@ use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::connections::activity_socket_path;
-use crate::core::permission::{PendingPermissions, PermissionVerdict};
+use crate::core::permission::{
+    MigrationVerdict, PendingMigrations, PendingPermissions, PermissionVerdict,
+};
 use crate::types::ActivityEvent;
 
 /// Erased emitter shared by UI- and MCP-mode core fns.
@@ -28,12 +30,17 @@ pub type McpWriter = Arc<Mutex<Option<OwnedWriteHalf>>>;
 pub enum BridgeMsg {
     /// Event from the MCP process for the UI to render on its activity strip.
     Activity { event: ActivityEvent },
-    /// Verdict from the UI in response to a `permission_required` event.
-    /// The MCP side looks up `id` in its `PendingPermissions` and resolves
-    /// the oneshot.
+    /// Single-statement verdict in response to a `permission_required` event.
+    /// MCP looks up `id` in its `PendingPermissions` and resolves the oneshot.
     Verdict {
         id: String,
         verdict: PermissionVerdict,
+    },
+    /// Bulk-migration verdict in response to a `migration_required` event.
+    /// MCP looks up `id` in its `PendingMigrations`.
+    MigrationVerdict {
+        id: String,
+        verdict: MigrationVerdict,
     },
 }
 
@@ -53,15 +60,16 @@ pub fn tauri_emitter(app: AppHandle) -> EmitFn {
 /// If the UI is not running, the first emit's connect attempt fails and we
 /// silently drop the event — same POC behavior as before. Subsequent emits
 /// retry the connect.
-pub fn mcp_bridge(pending: PendingPermissions) -> EmitFn {
+pub fn mcp_bridge(pending: PendingPermissions, migrations: PendingMigrations) -> EmitFn {
     let writer: Arc<Mutex<Option<OwnedWriteHalf>>> = Arc::new(Mutex::new(None));
     let handle = tokio::runtime::Handle::try_current().ok();
     Arc::new(move |evt: ActivityEvent| {
         let Some(rt) = handle.clone() else { return };
         let writer = writer.clone();
         let pending = pending.clone();
+        let migrations = migrations.clone();
         rt.spawn(async move {
-            ensure_mcp_connection(&writer, &pending).await;
+            ensure_mcp_connection(&writer, &pending, &migrations).await;
             let mut guard = writer.lock().await;
             let Some(w) = guard.as_mut() else { return };
             let msg = BridgeMsg::Activity { event: evt };
@@ -80,7 +88,11 @@ pub fn mcp_bridge(pending: PendingPermissions) -> EmitFn {
 
 /// Open the socket and start the verdict reader if we haven't already.
 /// No-op once the connection is established.
-async fn ensure_mcp_connection(writer: &Arc<Mutex<Option<OwnedWriteHalf>>>, pending: &PendingPermissions) {
+async fn ensure_mcp_connection(
+    writer: &Arc<Mutex<Option<OwnedWriteHalf>>>,
+    pending: &PendingPermissions,
+    migrations: &PendingMigrations,
+) {
     let mut guard = writer.lock().await;
     if guard.is_some() {
         return;
@@ -97,6 +109,7 @@ async fn ensure_mcp_connection(writer: &Arc<Mutex<Option<OwnedWriteHalf>>>, pend
     *guard = Some(write_half);
 
     let pending = pending.clone();
+    let migrations = migrations.clone();
     tokio::spawn(async move {
         let mut lines = BufReader::new(read_half).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -111,6 +124,11 @@ async fn ensure_mcp_connection(writer: &Arc<Mutex<Option<OwnedWriteHalf>>>, pend
                 BridgeMsg::Verdict { id, verdict } => {
                     if let Err(e) = pending.resolve(&id, verdict).await {
                         tracing::warn!(error = %e, id = %id, "verdict for unknown request");
+                    }
+                }
+                BridgeMsg::MigrationVerdict { id, verdict } => {
+                    if let Err(e) = migrations.resolve(&id, verdict).await {
+                        tracing::warn!(error = %e, id = %id, "migration verdict for unknown request");
                     }
                 }
                 BridgeMsg::Activity { .. } => {
@@ -172,7 +190,8 @@ pub fn spawn_socket_listener(app: AppHandle, mcp_writer: McpWriter) {
                         BridgeMsg::Activity { event } => {
                             let _ = app.emit("activity", event);
                         }
-                        BridgeMsg::Verdict { .. } => {
+                        BridgeMsg::Verdict { .. }
+                        | BridgeMsg::MigrationVerdict { .. } => {
                             // UI shouldn't receive verdicts; ignore.
                         }
                     }
@@ -191,10 +210,33 @@ pub async fn send_verdict_to_mcp(
     id: &str,
     verdict: PermissionVerdict,
 ) -> Result<(), String> {
-    let msg = BridgeMsg::Verdict {
-        id: id.to_string(),
-        verdict,
-    };
+    write_bridge_msg(
+        writer,
+        BridgeMsg::Verdict {
+            id: id.to_string(),
+            verdict,
+        },
+    )
+    .await
+}
+
+/// Send a bulk-migration verdict over the same bridge.
+pub async fn send_migration_verdict_to_mcp(
+    writer: &McpWriter,
+    id: &str,
+    verdict: MigrationVerdict,
+) -> Result<(), String> {
+    write_bridge_msg(
+        writer,
+        BridgeMsg::MigrationVerdict {
+            id: id.to_string(),
+            verdict,
+        },
+    )
+    .await
+}
+
+async fn write_bridge_msg(writer: &McpWriter, msg: BridgeMsg) -> Result<(), String> {
     let mut line = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
     line.push('\n');
     let mut guard = writer.lock().await;

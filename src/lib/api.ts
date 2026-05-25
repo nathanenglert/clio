@@ -312,6 +312,32 @@ export type PermissionVerdict =
   | { kind: "deny" }
   | { kind: "modified"; sql: string };
 
+// ── Migrations (bulk multi-statement) ────────────────────────────
+// Mirrors src-tauri/src/core/permission.rs.
+
+export type MigrationStatement = {
+  index: number;
+  sql: string;
+  stmt_kind: string;
+  op_kind: string;
+  targets: PermissionTarget[];
+  /** `"allow" | "prompt" | "block"` */
+  verdict: string;
+  rule_label: string;
+  reason: string;
+};
+
+export type MigrationRequest = {
+  id: string;
+  source: "ui" | "mcp";
+  intent?: string;
+  statements: MigrationStatement[];
+};
+
+export type MigrationVerdict =
+  | { kind: "approve_and_prompt"; wrap_in_transaction: boolean }
+  | { kind: "reject" };
+
 export const api = {
   list_connections: () => invoke<Connection[]>("list_connections"),
   add_connection: (input: NewConnectionInput) =>
@@ -377,6 +403,8 @@ export const api = {
     }),
   resolve_permission: (id: string, verdict: PermissionVerdict) =>
     invoke<void>("resolve_permission", { id, verdict }),
+  resolve_migration: (id: string, verdict: MigrationVerdict) =>
+    invoke<void>("resolve_migration", { id, verdict }),
 };
 
 export function onActivity(

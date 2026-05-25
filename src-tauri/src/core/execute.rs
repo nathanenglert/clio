@@ -14,14 +14,16 @@
 //! subprocess (the production setup), the activity socket is one-way and
 //! the prompt path will hang. Phase 3 lands the bidirectional bridge.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use sqlx::Row as _;
 use std::time::Instant;
 
 use crate::types::{ActivityEvent, QueryResult};
 
-use super::permission::{PermissionRequest, PermissionVerdict};
-use super::policy::{self, OpKind, StmtKind, Verdict};
+use super::permission::{
+    MigrationRequest, MigrationStatement, MigrationVerdict, PermissionRequest, PermissionVerdict,
+};
+use super::policy::{self, OpKind, StmtInfo, StmtKind, Verdict};
 use super::query::{cap_payload, run_decoded};
 use super::Core;
 
@@ -157,6 +159,211 @@ fn emit_permission_required(core: &Core, req: &PermissionRequest) {
         detail,
         "pending",
         /* duration_ms */ 0,
+    )
+    .with_payload(payload);
+    (core.emit)(evt);
+}
+
+/// Bulk-migration runner. Parses every statement, classifies each against
+/// the policy, surfaces the full plan to the UI via `migration_required`,
+/// and waits for a bulk verdict. On `ApproveAndPrompt`, runs the plan
+/// statement-by-statement: in-policy statements run immediately, deviations
+/// fall through to the standard single-statement permission card. Wrapping
+/// in a transaction (default true on the verdict) makes any denial roll
+/// back the whole batch.
+///
+/// Returns a vector of QueryResult — one per statement that ran. If a
+/// deviation is denied (or any statement errors), returns Err and the
+/// transaction is rolled back.
+pub async fn execute_migration(
+    core: &Core,
+    conn: &str,
+    statements: Vec<String>,
+    intent: Option<&str>,
+) -> Result<Vec<QueryResult>> {
+    let started = Instant::now();
+    let r = run_migration_with_gate(core, conn, statements, intent).await;
+
+    let detail = match &r {
+        Ok(v) => format!("migration ran {} statement(s)", v.len()),
+        Err(e) => format!("migration failed: {e}"),
+    };
+    core.record_ok("execute_migration", detail, started, &r);
+    r
+}
+
+async fn run_migration_with_gate(
+    core: &Core,
+    conn: &str,
+    statements: Vec<String>,
+    intent: Option<&str>,
+) -> Result<Vec<QueryResult>> {
+    if statements.is_empty() {
+        return Err(anyhow!("execute_migration requires at least one statement"));
+    }
+
+    // Parse + classify each. Each input string must be a single statement;
+    // we reject multi-statement inputs to keep the per-row UI honest.
+    let rules = policy::default_rules();
+    let mut parsed: Vec<StmtInfo> = Vec::with_capacity(statements.len());
+    let mut classified: Vec<MigrationStatement> = Vec::with_capacity(statements.len());
+    for (idx, sql) in statements.iter().enumerate() {
+        let stmts = policy::parse_sql(sql).map_err(|e| anyhow!("stmt {idx}: {e}"))?;
+        if stmts.len() != 1 {
+            return Err(anyhow!(
+                "stmt {idx} must contain exactly one statement; got {}",
+                stmts.len()
+            ));
+        }
+        let info = stmts.into_iter().next().unwrap();
+        // No EXPLAIN here — we'd need the pool open for each statement and
+        // EXPLAIN fails for DDL (the bulk of migrations). The single-stmt
+        // path picks up row estimates when a deviation pauses for prompt.
+        let verdict = policy::evaluate(&rules, &info, /* estimate */ None);
+        let (vstr, rule, reason) = match &verdict {
+            Verdict::Allow { rule } => ("allow", rule.clone(), String::new()),
+            Verdict::Prompt { rule, reason } => ("prompt", rule.clone(), reason.clone()),
+            Verdict::Block { rule, reason } => ("block", rule.clone(), reason.clone()),
+        };
+        classified.push(MigrationStatement {
+            index: idx,
+            sql: sql.clone(),
+            stmt_kind: stmt_kind_str(info.kind).into(),
+            op_kind: op_kind_str(info.kind.op_kind()).into(),
+            targets: info.targets.clone(),
+            verdict: vstr.into(),
+            rule_label: rule,
+            reason,
+        });
+        parsed.push(info);
+    }
+
+    // Hard-stop on any Block — the UI surfaces the plan but won't even
+    // offer to run it once a statement is blocked outright.
+    let any_blocked = classified.iter().any(|s| s.verdict == "block");
+
+    // Register the bulk verdict slot, emit the plan, await.
+    let (id, rx) = core.pending_migrations.register().await;
+    let request = MigrationRequest {
+        id: id.clone(),
+        source: core.source.clone(),
+        intent: intent.map(String::from),
+        statements: classified.clone(),
+    };
+    emit_migration_required(core, &request);
+
+    let bulk_verdict = rx
+        .await
+        .map_err(|_| anyhow!("migration request was cancelled before resolve"))?;
+    let wrap_in_tx = match bulk_verdict {
+        MigrationVerdict::Reject => {
+            return Err(anyhow!("migration rejected by user"));
+        }
+        MigrationVerdict::ApproveAndPrompt {
+            wrap_in_transaction,
+        } => {
+            if any_blocked {
+                return Err(anyhow!(
+                    "migration includes blocked statements; cannot proceed"
+                ));
+            }
+            wrap_in_transaction
+        }
+    };
+
+    // Open the pool and (optionally) BEGIN a transaction.
+    let pool = core.pools.ensure(&core.meta, conn).await?;
+    let mut tx_opt = if wrap_in_tx {
+        Some(pool.begin().await.context("begin migration transaction")?)
+    } else {
+        None
+    };
+
+    let mut results: Vec<QueryResult> = Vec::with_capacity(statements.len());
+    for (idx, stmt) in parsed.iter().enumerate() {
+        let original_sql = &statements[idx];
+        let stmt_verdict = &classified[idx];
+
+        let final_sql: String = if stmt_verdict.verdict == "allow" {
+            original_sql.clone()
+        } else {
+            // Prompt fallthrough — emit single-statement card and wait.
+            let (rid, rx) = core.pending_permissions.register().await;
+            let req = PermissionRequest {
+                id: rid.clone(),
+                source: core.source.clone(),
+                sql: original_sql.clone(),
+                intent: intent.map(String::from),
+                op_kind: stmt_verdict.op_kind.clone(),
+                stmt_kind: stmt_verdict.stmt_kind.clone(),
+                targets: stmt.targets.clone(),
+                rule_label: stmt_verdict.rule_label.clone(),
+                reason: stmt_verdict.reason.clone(),
+                row_estimate: None,
+            };
+            emit_permission_required(core, &req);
+
+            let v = rx
+                .await
+                .map_err(|_| anyhow!("permission request was cancelled before resolve"))?;
+            match v {
+                PermissionVerdict::Allow => original_sql.clone(),
+                PermissionVerdict::Deny => {
+                    if let Some(tx) = tx_opt.take() {
+                        let _ = tx.rollback().await;
+                    }
+                    return Err(anyhow!(
+                        "migration aborted: stmt {idx} denied by user"
+                    ));
+                }
+                PermissionVerdict::Modified { sql: new_sql } => new_sql,
+            }
+        };
+
+        // Run the statement. Inside a transaction we go straight through
+        // sqlx — no redaction lookup, no pool round-trip — since redaction
+        // applies to query *output*, and migrations rarely return rows.
+        let exec_started = Instant::now();
+        match tx_opt.as_mut() {
+            Some(tx) => {
+                sqlx::query(&final_sql)
+                    .execute(&mut **tx)
+                    .await
+                    .with_context(|| format!("stmt {idx} failed"))?;
+            }
+            None => {
+                sqlx::query(&final_sql)
+                    .execute(&pool)
+                    .await
+                    .with_context(|| format!("stmt {idx} failed"))?;
+            }
+        }
+        results.push(QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            row_count: 0,
+            truncated: false,
+            elapsed_ms: exec_started.elapsed().as_millis() as u64,
+            redaction_meta: None,
+        });
+    }
+
+    if let Some(tx) = tx_opt {
+        tx.commit().await.context("commit migration transaction")?;
+    }
+
+    Ok(results)
+}
+
+fn emit_migration_required(core: &Core, req: &MigrationRequest) {
+    let detail = format!("migration · {} statement(s)", req.statements.len());
+    let payload = serde_json::to_string(req).ok();
+    let evt = ActivityEvent::new(
+        &core.source,
+        "migration_required",
+        detail,
+        "pending",
+        0,
     )
     .with_payload(payload);
     (core.emit)(evt);

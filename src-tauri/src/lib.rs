@@ -192,6 +192,20 @@ async fn resolve_permission(
     send_verdict_to_mcp(&writer, &id, verdict).await
 }
 
+/// Frontend → backend channel for resolving a pending bulk-migration
+/// request (Phase 4). `verdict` is one of:
+///   `{ "kind": "approve_and_prompt", "wrap_in_transaction": true }`
+///   `{ "kind": "reject" }`
+/// Writes the verdict over the same bidirectional bridge to the MCP.
+#[tauri::command]
+async fn resolve_migration(
+    writer: State<'_, McpWriter>,
+    id: String,
+    verdict: core::permission::MigrationVerdict,
+) -> Result<(), String> {
+    activity::send_migration_verdict_to_mcp(&writer, &id, verdict).await
+}
+
 /// Set the reveal-sensitive toggle state. Updates the View menu's checkmark
 /// and emits the `reveal-sensitive` event, mirroring what the native menu
 /// item does. Called from the command palette so the toggle is reachable
@@ -538,6 +552,7 @@ pub fn run() {
                     source: "ui".into(),
                     redactor_cache: Default::default(),
                     pending_permissions: Default::default(),
+                    pending_migrations: Default::default(),
                 }
             });
             handle.manage(core);
@@ -575,6 +590,7 @@ pub fn run() {
             update_classification,
             set_reveal_sensitive,
             resolve_permission,
+            resolve_migration,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -589,15 +605,17 @@ pub fn run_mcp() {
     rt.block_on(async move {
         let meta = connections::open_metadata().await.expect("metadata db");
         let pending_permissions = core::permission::PendingPermissions::default();
+        let pending_migrations = core::permission::PendingMigrations::default();
         let core = Core {
             meta,
             pools: PoolRegistry::default(),
             // Bridge connects lazily on first event and spawns a reader
-            // task that resolves incoming verdicts via pending_permissions.
-            emit: mcp_bridge(pending_permissions.clone()),
+            // task that resolves incoming verdicts via the pending registries.
+            emit: mcp_bridge(pending_permissions.clone(), pending_migrations.clone()),
             source: "mcp".into(),
             redactor_cache: Default::default(),
             pending_permissions,
+            pending_migrations,
         };
         let server = mcp::McpServer::new(core);
         let service = match server.serve(stdio()).await {

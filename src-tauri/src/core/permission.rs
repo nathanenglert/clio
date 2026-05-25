@@ -54,6 +54,80 @@ pub enum PermissionVerdict {
     Modified { sql: String },
 }
 
+// ── Migration (bulk multi-statement) ─────────────────────────────
+//
+// Phase 4 (design/README.md §"Bulk migration permission"). The agent calls
+// `execute_migration` with N statements; the backend classifies each, emits
+// a `migration_required` event with the full plan, and waits for the bulk
+// verdict. Approval then runs all in-policy statements automatically and
+// pauses on each deviation (which uses the existing single-statement
+// PermissionVerdict path).
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationRequest {
+    pub id: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    pub statements: Vec<MigrationStatement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationStatement {
+    pub index: usize,
+    pub sql: String,
+    pub stmt_kind: String,
+    pub op_kind: String,
+    pub targets: Vec<Target>,
+    /// `"allow" | "prompt" | "block"`
+    pub verdict: String,
+    pub rule_label: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MigrationVerdict {
+    /// Approve all in-policy statements. Each deviation will pause and ask
+    /// via the standard single-statement permission card during execution.
+    /// `wrap_in_transaction` wraps the whole batch in BEGIN/COMMIT so any
+    /// single denial / runtime error rolls back everything.
+    ApproveAndPrompt { wrap_in_transaction: bool },
+    /// Reject the whole batch — no statement runs.
+    Reject,
+}
+
+#[derive(Default, Clone)]
+pub struct PendingMigrations {
+    inner: Arc<Mutex<HashMap<String, oneshot::Sender<MigrationVerdict>>>>,
+}
+
+impl PendingMigrations {
+    pub async fn register(&self) -> (String, oneshot::Receiver<MigrationVerdict>) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.inner.lock().await.insert(id.clone(), tx);
+        (id, rx)
+    }
+
+    pub async fn resolve(&self, id: &str, verdict: MigrationVerdict) -> Result<(), String> {
+        let tx = self
+            .inner
+            .lock()
+            .await
+            .remove(id)
+            .ok_or_else(|| format!("no pending migration with id {id}"))?;
+        tx.send(verdict)
+            .map_err(|_| "migration requester is gone".to_string())?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub async fn cancel(&self, id: &str) {
+        let _ = self.inner.lock().await.remove(id);
+    }
+}
+
 /// In-memory map of `request_id → oneshot::Sender`. Default `Clone`
 /// shares the same backing map so the UI command and the MCP tool see the
 /// same pending list.
@@ -184,5 +258,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("requester is gone"));
+    }
+
+    #[tokio::test]
+    async fn migration_register_resolve() {
+        let pending = PendingMigrations::default();
+        let (id, rx) = pending.register().await;
+        let p2 = pending.clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            p2.resolve(
+                &id2,
+                MigrationVerdict::ApproveAndPrompt {
+                    wrap_in_transaction: true,
+                },
+            )
+            .await
+            .unwrap();
+        });
+        match rx.await.unwrap() {
+            MigrationVerdict::ApproveAndPrompt {
+                wrap_in_transaction,
+            } => assert!(wrap_in_transaction),
+            v => panic!("expected ApproveAndPrompt, got {v:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_resolve_unknown_errors() {
+        let pending = PendingMigrations::default();
+        let err = pending
+            .resolve("nope", MigrationVerdict::Reject)
+            .await
+            .unwrap_err();
+        assert!(err.contains("nope"));
     }
 }
