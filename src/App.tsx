@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { api, onActivity, type ActivityEvent, type Connection } from "./lib/api";
+import {
+  api,
+  onActivity,
+  type ActivityEvent,
+  type Connection,
+  type PermissionRequest,
+  type PermissionVerdict,
+} from "./lib/api";
 import { SchemaTree } from "./components/SchemaTree";
 import { Workspace } from "./components/Workspace";
 import { AgentSurface } from "./components/AgentSurface";
+import { PermissionCard } from "./components/PermissionCard";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 import { PendingTray } from "./components/PendingTray";
@@ -32,6 +40,11 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [sensitivityFor, setSensitivityFor] = useState<string | null>(null);
+  // Single-pending model for now — the design supports multiple in a queue
+  // but the activity stream only ever has one card surfaced at a time. New
+  // requests replace the visible one; Phase 4 (bulk migration) revisits.
+  const [pendingPermission, setPendingPermission] =
+    useState<PermissionRequest | null>(null);
 
   // Bridge from the once-mounted activity listener (closure capture) to the
   // live `tabs` API — populated below after useTabs runs. Used so
@@ -63,6 +76,14 @@ export function App() {
       setEvents((prev) => [...prev.slice(-199), e]);
       if (e.tool === "connect" || e.tool === "disconnect" || e.tool === "add_connection" || e.tool === "delete_connection") {
         refresh();
+      }
+      if (e.tool === "permission_required" && e.payload) {
+        try {
+          const req = JSON.parse(e.payload) as PermissionRequest;
+          setPendingPermission(req);
+        } catch (parseErr) {
+          console.error("permission_required: bad payload", parseErr);
+        }
       }
       if (e.tool === "propose_query" && e.source === "mcp" && e.payload) {
         const title = e.detail || "Proposed query";
@@ -528,11 +549,31 @@ export function App() {
           }}
         />
       </div>
+      {pendingPermission && (
+        <PermissionCard
+          request={pendingPermission}
+          onResolve={async (verdict: PermissionVerdict) => {
+            const req = pendingPermission;
+            setPendingPermission(null);
+            try {
+              await api.resolve_permission(req.id, verdict);
+            } catch (err) {
+              showToast(
+                <span>Couldn&apos;t resolve permission: {String(err)}</span>,
+                "err",
+              );
+              // Restore the card so the user can retry.
+              setPendingPermission(req);
+            }
+          }}
+        />
+      )}
       <AgentSurface
         events={agentEvents}
         recentQueries={recentQueries}
         onOpenSql={onAgentOpen}
         onRerunSql={onAgentRerun}
+        awaiting={!!pendingPermission}
       />
       {hasTrayWork && trayBatch && trayTab && (
         <div className="tray-region">

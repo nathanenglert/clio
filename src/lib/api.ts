@@ -139,9 +139,11 @@ export type ActivityEvent = {
   source: "ui" | "mcp";
   tool: string;
   detail: string;
-  status: "ok" | "error";
+  status: "ok" | "error" | "pending";
   duration_ms: number;
-  /** Full-fidelity payload for tools whose `detail` is truncated. Currently the un-truncated SQL on `run_query`. */
+  /** Full-fidelity payload for tools whose `detail` is truncated. Carries the
+   *  un-truncated SQL on `run_query`, and a JSON-serialized PermissionRequest
+   *  on `permission_required`. */
   payload?: string;
 };
 
@@ -280,6 +282,36 @@ export type ClassificationAction =
   | { kind: "set_category"; category: Category }
   | { kind: "add_manual"; category: Category };
 
+// ── Permission gates ─────────────────────────────────────────────
+// Mirrors src-tauri/src/core/permission.rs. Pushed to the frontend as the
+// `payload` JSON on a `permission_required` activity event, then resolved
+// via the `resolve_permission` Tauri command.
+
+export type PermissionTarget = {
+  schema?: string;
+  name: string;
+};
+
+export type PermissionRequest = {
+  id: string;
+  source: "ui" | "mcp";
+  sql: string;
+  intent?: string;
+  /** `read | write | ddl | destruct` */
+  op_kind: string;
+  /** Fine-grained: `select | update | drop_table | …` */
+  stmt_kind: string;
+  targets: PermissionTarget[];
+  rule_label: string;
+  reason: string;
+  row_estimate?: number;
+};
+
+export type PermissionVerdict =
+  | { kind: "allow" }
+  | { kind: "deny" }
+  | { kind: "modified"; sql: string };
+
 export const api = {
   list_connections: () => invoke<Connection[]>("list_connections"),
   add_connection: (input: NewConnectionInput) =>
@@ -343,6 +375,8 @@ export const api = {
       column,
       action,
     }),
+  resolve_permission: (id: string, verdict: PermissionVerdict) =>
+    invoke<void>("resolve_permission", { id, verdict }),
 };
 
 export function onActivity(

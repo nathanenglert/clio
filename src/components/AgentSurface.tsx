@@ -10,11 +10,15 @@ export function AgentSurface({
   recentQueries,
   onOpenSql,
   onRerunSql,
+  awaiting = false,
 }: {
   events: ActivityEvent[];
   recentQueries: ActivityEvent[];
   onOpenSql?: (sql: string) => void;
   onRerunSql?: (sql: string) => void;
+  /** True when there's a pending permission request — turns the strip red
+   *  and shows "Agent is waiting on you". */
+  awaiting?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState<AgentTab>("Stream");
@@ -57,9 +61,6 @@ export function AgentSurface({
     if (!parsed) return null;
     return `${parsed.schema}.${parsed.table}`;
   }, [lastDescribe]);
-
-  // Awaiting-approval state — POC has no write gating, so this stays false.
-  const awaiting = false;
 
   return expanded ? (
     <AgentDrawer
