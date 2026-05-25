@@ -41,8 +41,9 @@ pub struct PermissionRequest {
     pub row_estimate: Option<u64>,
 }
 
-/// Verdict the UI sends back via `resolve_permission`.
-#[derive(Debug, Clone, Deserialize)]
+/// Verdict the UI sends back via `resolve_permission`. Serialized over the
+/// bidirectional socket bridge (Phase 3), so we need both directions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PermissionVerdict {
     Allow,

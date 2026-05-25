@@ -7,7 +7,7 @@ mod types;
 
 use std::time::Duration;
 
-use activity::{mcp_emitter, spawn_socket_listener, tauri_emitter};
+use activity::{mcp_bridge, send_verdict_to_mcp, spawn_socket_listener, tauri_emitter, McpWriter};
 use core::Core;
 use pool::PoolRegistry;
 use rmcp::{transport::stdio, ServiceExt};
@@ -178,15 +178,18 @@ async fn update_classification(
 ///   `{ "kind": "allow" }`
 ///   `{ "kind": "deny" }`
 ///   `{ "kind": "modified", "sql": "..." }`
-/// Errors if no pending request matches the id, or if the requester (the
-/// `execute_statement` call awaiting on the oneshot) is no longer listening.
+///
+/// Writes the verdict over the bidirectional bridge to whichever MCP
+/// process is currently connected. The MCP-side reader resolves the
+/// oneshot in its `PendingPermissions`. Errors if no MCP is connected or
+/// if the socket write fails.
 #[tauri::command]
 async fn resolve_permission(
-    state: State<'_, Core>,
+    writer: State<'_, McpWriter>,
     id: String,
     verdict: core::permission::PermissionVerdict,
 ) -> Result<(), String> {
-    state.pending_permissions.resolve(&id, verdict).await
+    send_verdict_to_mcp(&writer, &id, verdict).await
 }
 
 /// Set the reveal-sensitive toggle state. Updates the View menu's checkmark
@@ -538,7 +541,12 @@ pub fn run() {
                 }
             });
             handle.manage(core);
-            spawn_socket_listener(handle.clone());
+            // Shared handle for verdict writes back to the MCP subprocess.
+            // The listener fills this in on every accept; resolve_permission
+            // reads from it to forward verdicts.
+            let mcp_writer: McpWriter = Default::default();
+            handle.manage(mcp_writer.clone());
+            spawn_socket_listener(handle.clone(), mcp_writer);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -580,13 +588,16 @@ pub fn run_mcp() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async move {
         let meta = connections::open_metadata().await.expect("metadata db");
+        let pending_permissions = core::permission::PendingPermissions::default();
         let core = Core {
             meta,
             pools: PoolRegistry::default(),
-            emit: mcp_emitter(),
+            // Bridge connects lazily on first event and spawns a reader
+            // task that resolves incoming verdicts via pending_permissions.
+            emit: mcp_bridge(pending_permissions.clone()),
             source: "mcp".into(),
             redactor_cache: Default::default(),
-            pending_permissions: Default::default(),
+            pending_permissions,
         };
         let server = mcp::McpServer::new(core);
         let service = match server.serve(stdio()).await {
