@@ -312,6 +312,29 @@ export type PermissionVerdict =
   | { kind: "deny" }
   | { kind: "modified"; sql: string };
 
+// ── Policy rules (per-connection — Phase 5) ──────────────────────
+// Mirrors src-tauri/src/core/policy.rs.
+
+/** Serde renders this externally tagged:
+ *    Any   → `"any"` (plain string)
+ *    Exact → `{ "exact": "<value>" }` */
+export type PatternPart = { exact: string } | "any";
+
+export type TargetPattern = {
+  schema: PatternPart;
+  name: PatternPart;
+};
+
+export type VerdictKindLabel = "allow" | "prompt" | "block";
+
+export type PolicyRule = {
+  stmt_kinds: string[];
+  target: TargetPattern;
+  max_rows: number | null;
+  verdict: VerdictKindLabel;
+  label: string;
+};
+
 // ── Migrations (bulk multi-statement) ────────────────────────────
 // Mirrors src-tauri/src/core/permission.rs.
 
@@ -405,6 +428,8 @@ export const api = {
     invoke<void>("resolve_permission", { id, verdict }),
   resolve_migration: (id: string, verdict: MigrationVerdict) =>
     invoke<void>("resolve_migration", { id, verdict }),
+  list_policy_rules: (connection: string | null = null) =>
+    invoke<PolicyRule[]>("list_policy_rules", { connection }),
 };
 
 export function onActivity(

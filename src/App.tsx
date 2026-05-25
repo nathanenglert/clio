@@ -16,6 +16,7 @@ import { Workspace } from "./components/Workspace";
 import { AgentSurface } from "./components/AgentSurface";
 import { PermissionCard } from "./components/PermissionCard";
 import { BulkMigrationCard } from "./components/BulkMigrationCard";
+import { PolicyModal } from "./components/PolicyModal";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 import { PendingTray } from "./components/PendingTray";
@@ -50,6 +51,7 @@ export function App() {
     useState<PermissionRequest | null>(null);
   const [pendingMigration, setPendingMigration] =
     useState<MigrationRequest | null>(null);
+  const [policyOpen, setPolicyOpen] = useState(false);
 
   // Bridge from the once-mounted activity listener (closure capture) to the
   // live `tabs` API — populated below after useTabs runs. Used so
@@ -266,6 +268,19 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((v) => !v);
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // ⌘⇧. opens the policy viewer (design/README.md §"Keyboard shortcuts ·
+  // Agent"). Toggle behavior matches ⌘K.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === ".") {
+        e.preventDefault();
+        setPolicyOpen((v) => !v);
       }
     }
     document.addEventListener("keydown", onKey);
@@ -666,6 +681,15 @@ export function App() {
             </span>
           </>
         )}
+        <span>·</span>
+        <button
+          className="status-sens-button"
+          title="View policy rules (⌘⇧.)"
+          onClick={() => setPolicyOpen(true)}
+        >
+          <span aria-hidden style={{ color: "var(--op-write)" }}>⚖</span>
+          <span>policy: default</span>
+        </button>
         <span style={{ marginLeft: "auto", color: "var(--text-faint)" }}>
           POC v0.0
         </span>
@@ -678,6 +702,12 @@ export function App() {
         />
       )}
       {showMcp && <McpConfigModal onClose={() => setShowMcp(false)} />}
+      {policyOpen && (
+        <PolicyModal
+          connection={activeName}
+          onClose={() => setPolicyOpen(false)}
+        />
+      )}
       {snippetsModalOpen && (
         <SnippetsModal
           snippets={snippets}

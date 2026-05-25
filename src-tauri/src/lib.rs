@@ -206,6 +206,16 @@ async fn resolve_migration(
     activity::send_migration_verdict_to_mcp(&writer, &id, verdict).await
 }
 
+/// Returns the active policy ruleset surfaced by `execute_statement` and
+/// `execute_migration`. Phase 5 ships with the default ruleset only; per-
+/// connection overrides + session overrides land in a follow-up. The
+/// `_connection` arg is accepted for forward compatibility — once
+/// per-connection rules persist, this will look up rules for that conn.
+#[tauri::command]
+fn list_policy_rules(_connection: Option<String>) -> Vec<core::policy::Rule> {
+    core::policy::default_rules()
+}
+
 /// Set the reveal-sensitive toggle state. Updates the View menu's checkmark
 /// and emits the `reveal-sensitive` event, mirroring what the native menu
 /// item does. Called from the command palette so the toggle is reachable
@@ -591,6 +601,7 @@ pub fn run() {
             set_reveal_sensitive,
             resolve_permission,
             resolve_migration,
+            list_policy_rules,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

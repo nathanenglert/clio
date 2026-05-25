@@ -25,7 +25,8 @@ pub enum OpKind {
 
 /// Fine-grained statement kind. Rules match on this directly so that
 /// `DROP TABLE` can be blocked while `DROP INDEX` only prompts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StmtKind {
     Select,
     Insert,
@@ -92,9 +93,12 @@ pub struct StmtInfo {
     pub cte_writes: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PatternPart {
+    /// Serialized as `{"exact": "..."}` (serde externally-tagged default).
     Exact(String),
+    /// Serialized as the string `"any"`.
     Any,
 }
 
@@ -109,7 +113,7 @@ impl PatternPart {
 }
 
 /// Schema + name pattern, e.g. `public.*`, `audit.*`, `*.*`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TargetPattern {
     pub schema: PatternPart,
     pub name: PatternPart,
@@ -135,14 +139,15 @@ impl TargetPattern {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VerdictKind {
     Allow,
     Prompt,
     Block,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Rule {
     /// Statement kinds this rule applies to. Empty = applies to all.
     pub stmt_kinds: Vec<StmtKind>,
