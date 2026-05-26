@@ -1,13 +1,12 @@
 import type { ActivityEvent } from "../lib/api";
 import { Splitter } from "./Splitter";
 import {
-  AgentDot,
   type AgentTab,
   ComingSoon,
-  fmtElapsed,
   type ResizeHandle,
   TABS,
 } from "./agentShared";
+import { Lunate, RecordMeta } from "./brand";
 import { StreamView } from "./AgentStreamView";
 import { HistoryView } from "./AgentHistoryView";
 
@@ -79,17 +78,8 @@ export function AgentDrawer({
           borderBottom: "1px solid var(--line-soft)",
         }}
       >
-        <AgentDot pulse />
-        <span style={{ fontSize: 12, fontWeight: 500 }}>Agent activity</span>
-        <span
-          style={{
-            fontSize: 10,
-            color: "var(--text-muted)",
-            fontFamily: "var(--font-mono)",
-          }}
-        >
-          · session {fmtElapsed(now - sessionStart)}
-        </span>
+        <Lunate size={14} />
+        <span style={{ fontSize: 12, fontWeight: 500 }}>Today&apos;s record</span>
         <div style={{ marginLeft: 16, display: "flex", gap: 2 }}>
           {TABS.map((t) => {
             const active = t === tab;
@@ -115,6 +105,11 @@ export function AgentDrawer({
           })}
         </div>
         <div style={{ flex: 1 }} />
+        <RecordMeta
+          sessionStart={sessionStart}
+          entryCount={events.length}
+          prefix={null}
+        />
         <button
           aria-label="Close"
           onClick={onCollapse}

@@ -38,6 +38,9 @@ type Props = {
   onRunLibrary?: (q: SavedQuery) => void;
   /** Delete a saved query (already confirmed at the call site). */
   onDeleteLibrary?: (q: SavedQuery) => void;
+  /** Fired around api.connect so App can drive the "Opening the record…"
+   *  hero. Start with the in-flight Connection, end with null. */
+  onConnectingChange?: (conn: Connection | null) => void;
 };
 
 const DELETE_CONFIRM_TIMEOUT_MS = 3000;
@@ -137,6 +140,7 @@ export function SchemaTree({
   onOpenLibrary,
   onRunLibrary,
   onDeleteLibrary,
+  onConnectingChange,
 }: Props) {
   const connection = connections.find((c) => c.name === activeName) ?? null;
   const connectionName = connection && connection.connected ? connection.name : null;
@@ -247,8 +251,13 @@ export function SchemaTree({
         await api.disconnect(c.name);
       } else {
         if (!c.connected) {
-          const outcome = await api.connect(c.name);
-          onConnected?.(c.name, outcome);
+          onConnectingChange?.(c);
+          try {
+            const outcome = await api.connect(c.name);
+            onConnected?.(c.name, outcome);
+          } finally {
+            onConnectingChange?.(null);
+          }
         }
         onSelect(c.name);
       }

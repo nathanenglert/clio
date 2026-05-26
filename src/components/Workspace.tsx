@@ -9,6 +9,7 @@ import { JsonSidebar, type JsonSidebarTarget } from "./JsonSidebar";
 import { TableStructure } from "./TableStructure";
 import { useResizable } from "../lib/useResizable";
 import { getEdit } from "../lib/editing";
+import { Lunate, Glyph } from "./brand";
 import type { Tab } from "../lib/useTabs";
 import type { useEditing } from "../lib/useEditing";
 import type { Intellisense } from "../lib/useIntellisense";
@@ -18,6 +19,9 @@ type TabMode = "data" | "structure";
 
 type Props = {
   active: Connection | null;
+  /** Non-null while an api.connect call is in flight — drives the "Opening
+   *  the record…" hero. May refer to a different connection than `active`. */
+  connecting: Connection | null;
   tabs: Tab[];
   activeTab: Tab | null;
   onSelectTab: (id: string) => void;
@@ -30,6 +34,8 @@ type Props = {
   /** ⌘⇧S — always opens the save sheet as a fresh entry. */
   onSaveAs: () => void;
   onOpenMcpModal: () => void;
+  /** Opens the Add Connection modal — wired from App. */
+  onAddConnection: () => void;
   /** Editing state hook (App-owned). */
   editing: ReturnType<typeof useEditing>;
   /** Mirror of the View > Reveal sensitive data toggle. UI-only. */
@@ -45,6 +51,7 @@ type Props = {
 
 export function Workspace({
   active,
+  connecting,
   tabs,
   activeTab,
   onSelectTab,
@@ -55,6 +62,7 @@ export function Workspace({
   onSave,
   onSaveAs,
   onOpenMcpModal,
+  onAddConnection,
   editing,
   reveal,
   intellisense,
@@ -158,14 +166,63 @@ export function Workspace({
     };
   }, [jsonOpen, result, batch, columnsMeta, schema, table, activeTab]);
 
-  if (!active) {
+  if (connecting) {
     return (
-      <div className="empty-pane">
-        <div className="serif" style={{ fontSize: "var(--fs-xl)" }}>
-          A workbench you watch from.
+      <div className="empty-pane connecting-pane">
+        <div className="connecting-mark">
+          <Lunate size={56} />
+          <span className="connecting-mark-ghost" aria-hidden>
+            <Lunate size={56} dot={false} color="var(--text-secondary)" />
+          </span>
         </div>
-        <div>Add a connection in the rail, then click it to connect.</div>
-        <button className="btn" onClick={onOpenMcpModal} style={{ marginTop: 12 }}>
+        <div className="connecting-title serif">Opening the record…</div>
+        <div className="connecting-progress" aria-hidden>
+          <span className="connecting-line" />
+          <span className="connecting-dot" />
+          <span className="connecting-line" />
+          <span className="connecting-dot connecting-dot--accent" />
+          <span className="connecting-line" />
+          <span className="connecting-dot" />
+        </div>
+        <div className="connecting-diag mono">
+          negotiating tls · verify-full · {connecting.host}:{connecting.port}
+        </div>
+      </div>
+    );
+  }
+
+  if (!active || !active.connected) {
+    return (
+      <div className="empty-pane empty-pane--brand">
+        <Lunate size={88} />
+        <h1 className="brand-empty-h1 serif">A workbench you watch from.</h1>
+        <p className="brand-empty-body">
+          Connect a Postgres database, then point your coding agent at it. Clio
+          keeps the record of every query it runs and lets you gate any write
+          before it touches the database.
+        </p>
+        <div className="brand-empty-actions">
+          <button className="btn primary" onClick={onAddConnection}>
+            Connect a database
+            <kbd className="kbd">⌘N</kbd>
+          </button>
+          <button
+            className="btn ghost"
+            disabled
+            title="Past records ship in v0.2"
+          >
+            <Glyph kind="lookback" size={14} color="var(--text-secondary)" />
+            Open a past record
+          </button>
+        </div>
+        <div className="brand-empty-hint mono">
+          ⌘K open palette · ? shortcuts
+        </div>
+        <button
+          className="btn brand-empty-mcp"
+          onClick={onOpenMcpModal}
+          title="MCP config"
+        >
           MCP config
         </button>
       </div>

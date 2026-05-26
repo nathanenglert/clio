@@ -24,6 +24,7 @@ import { PendingTray } from "./components/PendingTray";
 import { ReviewModal } from "./components/ReviewModal";
 import { SensitivityModal } from "./components/SensitivityModal";
 import { Splitter } from "./components/Splitter";
+import { Lunate, ClioWord, RecordMeta } from "./components/brand";
 import { ToastHost, showToast } from "./components/Toast";
 import { useResizable } from "./lib/useResizable";
 import { useTabs } from "./lib/useTabs";
@@ -60,6 +61,13 @@ export function App() {
   // `propose_query` events from the MCP socket can call addAgentTab without
   // every event listener rebinding on every render.
   const tabsRef = useRef<ReturnType<typeof useTabs> | null>(null);
+
+  // Shared session clock — status bar and agent dock both render off this.
+  const sessionStartRef = useRef(Date.now());
+
+  // Connection currently being opened. Drives the "Opening the record…" hero
+  // in the workspace. SchemaTree fires the start/end signals around api.connect.
+  const [connectingConn, setConnectingConn] = useState<Connection | null>(null);
 
   const rail = useResizable({
     storageKey: "db.layout.rail.width",
@@ -546,7 +554,14 @@ export function App() {
       style={{ "--rail-w": `${rail.size}px` } as CSSProperties}
     >
       <div className="titlebar" data-tauri-drag-region>
-        Clio
+        <Lunate size={13} color="var(--text-secondary)" />
+        <ClioWord size={12} dot={false} color="var(--text-primary)" />
+        {active && (
+          <>
+            <span className="titlebar-sep" aria-hidden>·</span>
+            <span className="titlebar-token">{active.name}</span>
+          </>
+        )}
       </div>
       <div className="rail">
         <SchemaTree
@@ -563,6 +578,7 @@ export function App() {
           onOpenLibrary={onOpenSavedQuery}
           onRunLibrary={onRunSavedQuery}
           onDeleteLibrary={onDeleteSavedQuery}
+          onConnectingChange={setConnectingConn}
         />
         <Splitter
           orientation="vertical"
@@ -590,6 +606,7 @@ export function App() {
         )}
         <Workspace
           active={active}
+          connecting={connectingConn}
           tabs={tabs.tabs}
           activeTab={tabs.activeTab}
           onSelectTab={tabs.setActive}
@@ -600,6 +617,7 @@ export function App() {
           onSave={onSave}
           onSaveAs={onSaveAs}
           onOpenMcpModal={() => setShowMcp(true)}
+          onAddConnection={() => setShowAdd(true)}
           editing={editing}
           reveal={reveal}
           intellisense={intellisense}
@@ -651,6 +669,7 @@ export function App() {
         onOpenSql={onAgentOpen}
         onRerunSql={onAgentRerun}
         awaiting={!!pendingPermission || !!pendingMigration}
+        sessionStart={sessionStartRef.current}
       />
       {hasTrayWork && trayBatch && trayTab && (
         <div className="tray-region">
@@ -689,6 +708,12 @@ export function App() {
         />
       )}
       <div className={`status ${reveal ? "status--revealing" : ""}`}>
+        <RecordMeta
+          sessionStart={sessionStartRef.current}
+          entryCount={events.length}
+          lunateSize={9}
+        />
+        <span className="status-divider" aria-hidden />
         <span>{connections.length} connection{connections.length === 1 ? "" : "s"}</span>
         <span>·</span>
         <span>{active ? (active.connected ? "connected" : "disconnected") : "no active connection"}</span>
