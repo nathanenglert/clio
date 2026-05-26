@@ -30,17 +30,35 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
 .shell {
   display: grid;
   grid-template-columns: var(--rail-w, 260px) 1fr;
-  grid-template-rows: 36px 1fr auto auto 22px;
+  grid-template-rows: 36px 1fr auto auto auto 22px;
   grid-template-areas:
-    "titlebar titlebar"
-    "rail     work"
-    "tray     tray"
-    "agent    agent"
-    "status   status";
+    "titlebar    titlebar"
+    "rail        work"
+    "tray        tray"
+    "permission  permission"
+    "agent       agent"
+    "status      status";
   height: 100vh;
   width: 100vw;
   background: var(--bg-app);
   overflow: hidden;
+}
+
+.permission-card {
+  grid-area: permission;
+  min-width: 0;
+  animation: permission-slide-in 180ms ease-out;
+}
+
+@keyframes permission-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .titlebar {

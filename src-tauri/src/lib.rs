@@ -7,7 +7,7 @@ mod types;
 
 use std::time::Duration;
 
-use activity::{mcp_emitter, spawn_socket_listener, tauri_emitter};
+use activity::{mcp_bridge, send_verdict_to_mcp, spawn_socket_listener, tauri_emitter, McpWriter};
 use core::Core;
 use pool::PoolRegistry;
 use rmcp::{transport::stdio, ServiceExt};
@@ -96,7 +96,7 @@ async fn run_query(
 ) -> Result<QueryResult, String> {
     // `reveal` is UI-only. Default false (mask). The MCP handler hardcodes
     // false at the call site (see mcp.rs).
-    core::run_query(&state, &connection, &sql, reveal.unwrap_or(false))
+    core::run_sql(&state, &connection, &sql, reveal.unwrap_or(false))
         .await
         .map_err(format_err)
 }
@@ -170,6 +170,50 @@ async fn update_classification(
     core::update_classification(&state, &connection, &schema, &table, &column, action)
         .await
         .map_err(format_err)
+}
+
+/// Frontend → backend channel for resolving a pending permission request.
+/// `id` is the request id from the `permission_required` activity event.
+/// `verdict` is one of:
+///   `{ "kind": "allow" }`
+///   `{ "kind": "deny" }`
+///   `{ "kind": "modified", "sql": "..." }`
+///
+/// Writes the verdict over the bidirectional bridge to whichever MCP
+/// process is currently connected. The MCP-side reader resolves the
+/// oneshot in its `PendingPermissions`. Errors if no MCP is connected or
+/// if the socket write fails.
+#[tauri::command]
+async fn resolve_permission(
+    writer: State<'_, McpWriter>,
+    id: String,
+    verdict: core::permission::PermissionVerdict,
+) -> Result<(), String> {
+    send_verdict_to_mcp(&writer, &id, verdict).await
+}
+
+/// Frontend → backend channel for resolving a pending bulk-migration
+/// request (Phase 4). `verdict` is one of:
+///   `{ "kind": "approve_and_prompt", "wrap_in_transaction": true }`
+///   `{ "kind": "reject" }`
+/// Writes the verdict over the same bidirectional bridge to the MCP.
+#[tauri::command]
+async fn resolve_migration(
+    writer: State<'_, McpWriter>,
+    id: String,
+    verdict: core::permission::MigrationVerdict,
+) -> Result<(), String> {
+    activity::send_migration_verdict_to_mcp(&writer, &id, verdict).await
+}
+
+/// Returns the active policy ruleset surfaced by `execute_statement` and
+/// `execute_migration`. Phase 5 ships with the default ruleset only; per-
+/// connection overrides + session overrides land in a follow-up. The
+/// `_connection` arg is accepted for forward compatibility — once
+/// per-connection rules persist, this will look up rules for that conn.
+#[tauri::command]
+fn list_policy_rules(_connection: Option<String>) -> Vec<core::policy::Rule> {
+    core::policy::default_rules()
 }
 
 /// Set the reveal-sensitive toggle state. Updates the View menu's checkmark
@@ -517,10 +561,17 @@ pub fn run() {
                     emit,
                     source: "ui".into(),
                     redactor_cache: Default::default(),
+                    pending_permissions: Default::default(),
+                    pending_migrations: Default::default(),
                 }
             });
             handle.manage(core);
-            spawn_socket_listener(handle.clone());
+            // Shared handle for verdict writes back to the MCP subprocess.
+            // The listener fills this in on every accept; resolve_permission
+            // reads from it to forward verdicts.
+            let mcp_writer: McpWriter = Default::default();
+            handle.manage(mcp_writer.clone());
+            spawn_socket_listener(handle.clone(), mcp_writer);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -548,6 +599,9 @@ pub fn run() {
             list_classifications,
             update_classification,
             set_reveal_sensitive,
+            resolve_permission,
+            resolve_migration,
+            list_policy_rules,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -561,12 +615,18 @@ pub fn run_mcp() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async move {
         let meta = connections::open_metadata().await.expect("metadata db");
+        let pending_permissions = core::permission::PendingPermissions::default();
+        let pending_migrations = core::permission::PendingMigrations::default();
         let core = Core {
             meta,
             pools: PoolRegistry::default(),
-            emit: mcp_emitter(),
+            // Bridge connects lazily on first event and spawns a reader
+            // task that resolves incoming verdicts via the pending registries.
+            emit: mcp_bridge(pending_permissions.clone(), pending_migrations.clone()),
             source: "mcp".into(),
             redactor_cache: Default::default(),
+            pending_permissions,
+            pending_migrations,
         };
         let server = mcp::McpServer::new(core);
         let service = match server.serve(stdio()).await {

@@ -1,10 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { api, onActivity, type ActivityEvent, type Connection } from "./lib/api";
+import {
+  api,
+  onActivity,
+  type ActivityEvent,
+  type Connection,
+  type MigrationRequest,
+  type MigrationVerdict,
+  type PermissionRequest,
+  type PermissionVerdict,
+} from "./lib/api";
 import { SchemaTree } from "./components/SchemaTree";
 import { Workspace } from "./components/Workspace";
 import { AgentSurface } from "./components/AgentSurface";
+import { PermissionCard } from "./components/PermissionCard";
+import { BulkMigrationCard } from "./components/BulkMigrationCard";
+import { PolicyModal } from "./components/PolicyModal";
+import { ShortcutsOverlay } from "./components/ShortcutsOverlay";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 import { PendingTray } from "./components/PendingTray";
@@ -32,6 +45,15 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [sensitivityFor, setSensitivityFor] = useState<string | null>(null);
+  // Single-pending model for now — the design supports multiple in a queue
+  // but the activity stream only ever has one card surfaced at a time. New
+  // requests replace the visible one; Phase 4 (bulk migration) revisits.
+  const [pendingPermission, setPendingPermission] =
+    useState<PermissionRequest | null>(null);
+  const [pendingMigration, setPendingMigration] =
+    useState<MigrationRequest | null>(null);
+  const [policyOpen, setPolicyOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   // Bridge from the once-mounted activity listener (closure capture) to the
   // live `tabs` API — populated below after useTabs runs. Used so
@@ -63,6 +85,22 @@ export function App() {
       setEvents((prev) => [...prev.slice(-199), e]);
       if (e.tool === "connect" || e.tool === "disconnect" || e.tool === "add_connection" || e.tool === "delete_connection") {
         refresh();
+      }
+      if (e.tool === "permission_required" && e.payload) {
+        try {
+          const req = JSON.parse(e.payload) as PermissionRequest;
+          setPendingPermission(req);
+        } catch (parseErr) {
+          console.error("permission_required: bad payload", parseErr);
+        }
+      }
+      if (e.tool === "migration_required" && e.payload) {
+        try {
+          const req = JSON.parse(e.payload) as MigrationRequest;
+          setPendingMigration(req);
+        } catch (parseErr) {
+          console.error("migration_required: bad payload", parseErr);
+        }
       }
       if (e.tool === "propose_query" && e.source === "mcp" && e.payload) {
         const title = e.detail || "Proposed query";
@@ -238,6 +276,37 @@ export function App() {
     return () => document.removeEventListener("keydown", onKey);
   }, []);
 
+  // ⌘⇧. opens the policy viewer (design/README.md §"Keyboard shortcuts ·
+  // Agent"). Toggle behavior matches ⌘K. Note: with shift held on US
+  // keyboards, e.key is ">" — not ".". We match either so the binding fires
+  // regardless of which event Webkit hands us.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === "." || e.key === ">")) {
+        e.preventDefault();
+        setPolicyOpen((v) => !v);
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // `?` opens the keyboard shortcuts overlay (design/screenshots/31).
+  // Suppress when focus is inside an input/textarea so typing `?` in the
+  // schema filter or SQL editor doesn't summon the overlay.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "?") return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || t?.isContentEditable) return;
+      e.preventDefault();
+      setShortcutsOpen((v) => !v);
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
   // Commands shown in the palette. Each item is "current state" — for
   // example, "Reveal sensitive data" flips its title based on `reveal`. We
   // memoize per dep so the palette doesn't rebuild on every keystroke.
@@ -295,6 +364,19 @@ export function App() {
         title: "MCP config…",
         subtitle: "Connect this workbench to an AI agent",
         onSelect: () => setShowMcp(true),
+      },
+      {
+        id: "view-policy",
+        title: "View policy rules",
+        subtitle: "What the permission gate is enforcing",
+        kbd: "⌘⇧.",
+        onSelect: () => setPolicyOpen(true),
+      },
+      {
+        id: "view-shortcuts",
+        title: "Keyboard shortcuts",
+        kbd: "?",
+        onSelect: () => setShortcutsOpen(true),
       },
     ];
     if (active?.connected) {
@@ -528,11 +610,47 @@ export function App() {
           }}
         />
       </div>
+      {pendingPermission ? (
+        <PermissionCard
+          request={pendingPermission}
+          onResolve={async (verdict: PermissionVerdict) => {
+            const req = pendingPermission;
+            setPendingPermission(null);
+            try {
+              await api.resolve_permission(req.id, verdict);
+            } catch (err) {
+              showToast(
+                <span>Couldn&apos;t resolve permission: {String(err)}</span>,
+                "err",
+              );
+              setPendingPermission(req);
+            }
+          }}
+        />
+      ) : pendingMigration ? (
+        <BulkMigrationCard
+          request={pendingMigration}
+          onResolve={async (verdict: MigrationVerdict) => {
+            const req = pendingMigration;
+            setPendingMigration(null);
+            try {
+              await api.resolve_migration(req.id, verdict);
+            } catch (err) {
+              showToast(
+                <span>Couldn&apos;t resolve migration: {String(err)}</span>,
+                "err",
+              );
+              setPendingMigration(req);
+            }
+          }}
+        />
+      ) : null}
       <AgentSurface
         events={agentEvents}
         recentQueries={recentQueries}
         onOpenSql={onAgentOpen}
         onRerunSql={onAgentRerun}
+        awaiting={!!pendingPermission || !!pendingMigration}
       />
       {hasTrayWork && trayBatch && trayTab && (
         <div className="tray-region">
@@ -596,6 +714,15 @@ export function App() {
             </span>
           </>
         )}
+        <span>·</span>
+        <button
+          className="status-sens-button"
+          title="View policy rules (⌘⇧.)"
+          onClick={() => setPolicyOpen(true)}
+        >
+          <span aria-hidden style={{ color: "var(--op-write)" }}>⚖</span>
+          <span>policy: default</span>
+        </button>
         <span style={{ marginLeft: "auto", color: "var(--text-faint)" }}>
           POC v0.0
         </span>
@@ -608,6 +735,15 @@ export function App() {
         />
       )}
       {showMcp && <McpConfigModal onClose={() => setShowMcp(false)} />}
+      {policyOpen && (
+        <PolicyModal
+          connection={activeName}
+          onClose={() => setPolicyOpen(false)}
+        />
+      )}
+      {shortcutsOpen && (
+        <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />
+      )}
       {snippetsModalOpen && (
         <SnippetsModal
           snippets={snippets}

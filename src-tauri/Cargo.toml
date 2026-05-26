@@ -66,6 +66,11 @@ rmcp = { version = "1.7", features = [
 ] }
 schemars = "1"
 
+# SQL parser for the permission-gate policy evaluator. AST-level extraction
+# of op kind + targets so we can distinguish DROP TABLE from DROP SCHEMA and
+# handle CTE writes correctly.
+sqlparser = "0.62"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

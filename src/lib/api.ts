@@ -139,9 +139,11 @@ export type ActivityEvent = {
   source: "ui" | "mcp";
   tool: string;
   detail: string;
-  status: "ok" | "error";
+  status: "ok" | "error" | "pending";
   duration_ms: number;
-  /** Full-fidelity payload for tools whose `detail` is truncated. Currently the un-truncated SQL on `run_query`. */
+  /** Full-fidelity payload for tools whose `detail` is truncated. Carries the
+   *  un-truncated SQL on `run_query`, and a JSON-serialized PermissionRequest
+   *  on `permission_required`. */
   payload?: string;
 };
 
@@ -280,6 +282,85 @@ export type ClassificationAction =
   | { kind: "set_category"; category: Category }
   | { kind: "add_manual"; category: Category };
 
+// ── Permission gates ─────────────────────────────────────────────
+// Mirrors src-tauri/src/core/permission.rs. Pushed to the frontend as the
+// `payload` JSON on a `permission_required` activity event, then resolved
+// via the `resolve_permission` Tauri command.
+
+export type PermissionTarget = {
+  schema?: string;
+  name: string;
+};
+
+export type PermissionRequest = {
+  id: string;
+  source: "ui" | "mcp";
+  sql: string;
+  intent?: string;
+  /** `read | write | ddl | destruct` */
+  op_kind: string;
+  /** Fine-grained: `select | update | drop_table | …` */
+  stmt_kind: string;
+  targets: PermissionTarget[];
+  rule_label: string;
+  reason: string;
+  row_estimate?: number;
+};
+
+export type PermissionVerdict =
+  | { kind: "allow" }
+  | { kind: "deny" }
+  | { kind: "modified"; sql: string };
+
+// ── Policy rules (per-connection — Phase 5) ──────────────────────
+// Mirrors src-tauri/src/core/policy.rs.
+
+/** Serde renders this externally tagged:
+ *    Any   → `"any"` (plain string)
+ *    Exact → `{ "exact": "<value>" }` */
+export type PatternPart = { exact: string } | "any";
+
+export type TargetPattern = {
+  schema: PatternPart;
+  name: PatternPart;
+};
+
+export type VerdictKindLabel = "allow" | "prompt" | "block";
+
+export type PolicyRule = {
+  stmt_kinds: string[];
+  target: TargetPattern;
+  max_rows: number | null;
+  verdict: VerdictKindLabel;
+  label: string;
+};
+
+// ── Migrations (bulk multi-statement) ────────────────────────────
+// Mirrors src-tauri/src/core/permission.rs.
+
+export type MigrationStatement = {
+  index: number;
+  sql: string;
+  stmt_kind: string;
+  op_kind: string;
+  targets: PermissionTarget[];
+  /** `"allow" | "prompt" | "block"` */
+  verdict: string;
+  rule_label: string;
+  reason: string;
+};
+
+export type MigrationRequest = {
+  id: string;
+  source: "ui" | "mcp";
+  intent?: string;
+  statements: MigrationStatement[];
+};
+
+export type MigrationVerdict =
+  | { kind: "approve_and_prompt"; wrap_in_transaction: boolean }
+  | { kind: "reject" };
+
 export const api = {
   list_connections: () => invoke<Connection[]>("list_connections"),
   add_connection: (input: NewConnectionInput) =>
@@ -343,6 +424,12 @@ export const api = {
       column,
       action,
     }),
+  resolve_permission: (id: string, verdict: PermissionVerdict) =>
+    invoke<void>("resolve_permission", { id, verdict }),
+  resolve_migration: (id: string, verdict: MigrationVerdict) =>
+    invoke<void>("resolve_migration", { id, verdict }),
+  list_policy_rules: (connection: string | null = null) =>
+    invoke<PolicyRule[]>("list_policy_rules", { connection }),
 };
 
 export function onActivity(
