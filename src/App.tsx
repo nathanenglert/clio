@@ -65,6 +65,10 @@ export function App() {
   // Shared session clock — status bar and agent dock both render off this.
   const sessionStartRef = useRef(Date.now());
 
+  // Connection currently being opened. Drives the "Opening the record…" hero
+  // in the workspace. SchemaTree fires the start/end signals around api.connect.
+  const [connectingConn, setConnectingConn] = useState<Connection | null>(null);
+
   const rail = useResizable({
     storageKey: "db.layout.rail.width",
     defaultSize: 260,
@@ -574,6 +578,7 @@ export function App() {
           onOpenLibrary={onOpenSavedQuery}
           onRunLibrary={onRunSavedQuery}
           onDeleteLibrary={onDeleteSavedQuery}
+          onConnectingChange={setConnectingConn}
         />
         <Splitter
           orientation="vertical"
@@ -601,6 +606,7 @@ export function App() {
         )}
         <Workspace
           active={active}
+          connecting={connectingConn}
           tabs={tabs.tabs}
           activeTab={tabs.activeTab}
           onSelectTab={tabs.setActive}

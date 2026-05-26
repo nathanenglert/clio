@@ -19,6 +19,9 @@ type TabMode = "data" | "structure";
 
 type Props = {
   active: Connection | null;
+  /** Non-null while an api.connect call is in flight — drives the "Opening
+   *  the record…" hero. May refer to a different connection than `active`. */
+  connecting: Connection | null;
   tabs: Tab[];
   activeTab: Tab | null;
   onSelectTab: (id: string) => void;
@@ -48,6 +51,7 @@ type Props = {
 
 export function Workspace({
   active,
+  connecting,
   tabs,
   activeTab,
   onSelectTab,
@@ -162,7 +166,32 @@ export function Workspace({
     };
   }, [jsonOpen, result, batch, columnsMeta, schema, table, activeTab]);
 
-  if (!active) {
+  if (connecting) {
+    return (
+      <div className="empty-pane connecting-pane">
+        <div className="connecting-mark">
+          <Lunate size={56} />
+          <span className="connecting-mark-ghost" aria-hidden>
+            <Lunate size={56} dot={false} color="var(--text-secondary)" />
+          </span>
+        </div>
+        <div className="connecting-title serif">Opening the record…</div>
+        <div className="connecting-progress" aria-hidden>
+          <span className="connecting-line" />
+          <span className="connecting-dot" />
+          <span className="connecting-line" />
+          <span className="connecting-dot connecting-dot--accent" />
+          <span className="connecting-line" />
+          <span className="connecting-dot" />
+        </div>
+        <div className="connecting-diag mono">
+          negotiating tls · verify-full · {connecting.host}:{connecting.port}
+        </div>
+      </div>
+    );
+  }
+
+  if (!active || !active.connected) {
     return (
       <div className="empty-pane empty-pane--brand">
         <Lunate size={88} />
@@ -196,31 +225,6 @@ export function Workspace({
         >
           MCP config
         </button>
-      </div>
-    );
-  }
-
-  if (!active.connected) {
-    return (
-      <div className="empty-pane connecting-pane">
-        <div className="connecting-mark">
-          <Lunate size={56} />
-          <span className="connecting-mark-ghost" aria-hidden>
-            <Lunate size={56} dot={false} color="var(--text-secondary)" />
-          </span>
-        </div>
-        <div className="connecting-title serif">Opening the record…</div>
-        <div className="connecting-progress" aria-hidden>
-          <span className="connecting-line" />
-          <span className="connecting-dot" />
-          <span className="connecting-line" />
-          <span className="connecting-dot connecting-dot--accent" />
-          <span className="connecting-line" />
-          <span className="connecting-dot" />
-        </div>
-        <div className="connecting-diag mono">
-          negotiating tls · verify-full · {active.host}:{active.port}
-        </div>
       </div>
     );
   }
