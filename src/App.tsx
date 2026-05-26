@@ -24,7 +24,7 @@ import { PendingTray } from "./components/PendingTray";
 import { ReviewModal } from "./components/ReviewModal";
 import { SensitivityModal } from "./components/SensitivityModal";
 import { Splitter } from "./components/Splitter";
-import { Lunate, ClioWord } from "./components/brand";
+import { Lunate, ClioWord, RecordMeta } from "./components/brand";
 import { ToastHost, showToast } from "./components/Toast";
 import { useResizable } from "./lib/useResizable";
 import { useTabs } from "./lib/useTabs";
@@ -61,6 +61,9 @@ export function App() {
   // `propose_query` events from the MCP socket can call addAgentTab without
   // every event listener rebinding on every render.
   const tabsRef = useRef<ReturnType<typeof useTabs> | null>(null);
+
+  // Shared session clock — status bar and agent dock both render off this.
+  const sessionStartRef = useRef(Date.now());
 
   const rail = useResizable({
     storageKey: "db.layout.rail.width",
@@ -697,6 +700,12 @@ export function App() {
         />
       )}
       <div className={`status ${reveal ? "status--revealing" : ""}`}>
+        <RecordMeta
+          sessionStart={sessionStartRef.current}
+          entryCount={events.length}
+          lunateSize={9}
+        />
+        <span className="status-divider" aria-hidden />
         <span>{connections.length} connection{connections.length === 1 ? "" : "s"}</span>
         <span>·</span>
         <span>{active ? (active.connected ? "connected" : "disconnected") : "no active connection"}</span>

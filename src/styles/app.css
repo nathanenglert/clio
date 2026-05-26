@@ -30,7 +30,7 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
 .shell {
   display: grid;
   grid-template-columns: var(--rail-w, 260px) 1fr;
-  grid-template-rows: 36px 1fr auto auto auto 22px;
+  grid-template-rows: 36px 1fr auto auto auto 24px;
   grid-template-areas:
     "titlebar    titlebar"
     "rail        work"
@@ -125,6 +125,25 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   gap: 10px;
   font-size: var(--fs-xs);
   color: var(--text-muted);
+}
+
+.status-record-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-record-chip-text {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.status-divider {
+  display: inline-block;
+  width: 1px;
+  height: 12px;
+  background: var(--line-soft);
 }
 
 /* ── Rail / schema tree ───────────────────────────────────────────── */

@@ -1,6 +1,6 @@
 // Clio brand primitives. See brand/BRAND.md for specs.
 // Use these everywhere the brand appears — do not inline SVG copies.
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 
 type LunateProps = {
   size?: number;
@@ -200,4 +200,58 @@ export function Glyph({
   }
 
   return null;
+}
+
+function fmtHHMM(ms: number) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+type RecordMetaProps = {
+  sessionStart: number;
+  entryCount: number;
+  /** Lunate size (omit to skip the leading mark — useful in dock-header
+   *  contexts where the mark already appears beside the title). */
+  lunateSize?: number;
+  lunateColor?: string;
+  /** Text-only meta after the lunate. Default "record"; pass null for just the
+   *  mono `HH:MM · N entries`. */
+  prefix?: string | null;
+  textColor?: string;
+};
+
+// Shared `record · HH:MM · N entries` meta used by the status bar and the
+// agent dock header. Ticks every 30 s — HH:MM resolution doesn't need more.
+export function RecordMeta({
+  sessionStart,
+  entryCount,
+  lunateSize,
+  lunateColor = "var(--text-muted)",
+  prefix = "record",
+  textColor = "var(--text-muted)",
+}: RecordMetaProps) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const elapsed = fmtHHMM(now - sessionStart);
+  const entryLabel = entryCount === 1 ? "entry" : "entries";
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      {lunateSize ? <Lunate size={lunateSize} color={lunateColor} /> : null}
+      <span
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          color: textColor,
+        }}
+      >
+        {prefix ? `${prefix} · ` : ""}
+        {elapsed} · {entryCount} {entryLabel}
+      </span>
+    </span>
+  );
 }
