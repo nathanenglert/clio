@@ -24,6 +24,7 @@ import { PendingTray } from "./components/PendingTray";
 import { ReviewModal } from "./components/ReviewModal";
 import { SensitivityModal } from "./components/SensitivityModal";
 import { Splitter } from "./components/Splitter";
+import { Lunate, ClioWord } from "./components/brand";
 import { ToastHost, showToast } from "./components/Toast";
 import { useResizable } from "./lib/useResizable";
 import { useTabs } from "./lib/useTabs";
@@ -546,7 +547,14 @@ export function App() {
       style={{ "--rail-w": `${rail.size}px` } as CSSProperties}
     >
       <div className="titlebar" data-tauri-drag-region>
-        Clio
+        <Lunate size={13} color="var(--text-secondary)" />
+        <ClioWord size={12} dot={false} color="var(--text-primary)" />
+        {active && (
+          <>
+            <span className="titlebar-sep" aria-hidden>·</span>
+            <span className="titlebar-token">{active.name}</span>
+          </>
+        )}
       </div>
       <div className="rail">
         <SchemaTree
