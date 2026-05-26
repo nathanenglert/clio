@@ -96,7 +96,7 @@ async fn run_query(
 ) -> Result<QueryResult, String> {
     // `reveal` is UI-only. Default false (mask). The MCP handler hardcodes
     // false at the call site (see mcp.rs).
-    core::run_query(&state, &connection, &sql, reveal.unwrap_or(false))
+    core::run_sql(&state, &connection, &sql, reveal.unwrap_or(false))
         .await
         .map_err(format_err)
 }
