@@ -611,6 +611,7 @@ export function App() {
           onSave={onSave}
           onSaveAs={onSaveAs}
           onOpenMcpModal={() => setShowMcp(true)}
+          onAddConnection={() => setShowAdd(true)}
           editing={editing}
           reveal={reveal}
           intellisense={intellisense}
@@ -662,6 +663,7 @@ export function App() {
         onOpenSql={onAgentOpen}
         onRerunSql={onAgentRerun}
         awaiting={!!pendingPermission || !!pendingMigration}
+        sessionStart={sessionStartRef.current}
       />
       {hasTrayWork && trayBatch && trayTab && (
         <div className="tray-region">

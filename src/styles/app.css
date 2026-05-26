@@ -824,6 +824,29 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   color: var(--op-destruct);
   border-color: var(--op-destruct-soft);
 }
+.btn.ghost {
+  background: transparent;
+  border: 1px solid var(--line-soft);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn.ghost:hover:not(:disabled) { background: var(--bg-elevated); }
+.btn.ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn .kbd {
+  margin-left: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  color: inherit;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.btn.primary .kbd { background: rgba(0, 0, 0, 0.18); color: var(--bg-app); }
 
 /* ── Workspace: tab strip ─────────────────────────────────────────── */
 
@@ -1284,6 +1307,95 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   text-align: center;
   color: var(--text-secondary);
   gap: 12px;
+}
+
+.empty-pane--brand {
+  gap: 28px;
+}
+
+.brand-empty-h1 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: 32px;
+  font-weight: 500;
+  line-height: 1.2;
+  max-width: 460px;
+  color: var(--text-primary);
+}
+
+.brand-empty-body {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.65;
+  max-width: 440px;
+  color: var(--text-secondary);
+}
+
+.brand-empty-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.brand-empty-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.01em;
+}
+
+.brand-empty-mcp {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px dashed var(--line-soft);
+}
+
+.connecting-pane { gap: 28px; }
+
+.connecting-mark {
+  position: relative;
+  width: 56px;
+  height: 56px;
+}
+.connecting-mark-ghost {
+  position: absolute;
+  inset: 0;
+  opacity: 0.18;
+  transform: translate(4px, 2px);
+}
+
+.connecting-title {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 18px;
+  color: var(--text-primary);
+}
+
+.connecting-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.connecting-line {
+  width: 14px;
+  height: 1px;
+  background: var(--line-soft);
+}
+.connecting-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.connecting-dot--accent {
+  background: var(--agent);
+  box-shadow: 0 0 6px var(--agent-soft);
+}
+
+.connecting-diag {
+  font-size: 11px;
+  color: var(--text-faint);
 }
 
 .grid-empty {

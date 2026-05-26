@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ActivityEvent } from "../lib/api";
 import { useResizable } from "../lib/useResizable";
 import { type AgentTab, findLastByTool, parseDescribe } from "./agentShared";
@@ -11,6 +11,7 @@ export function AgentSurface({
   onOpenSql,
   onRerunSql,
   awaiting = false,
+  sessionStart,
 }: {
   events: ActivityEvent[];
   recentQueries: ActivityEvent[];
@@ -19,10 +20,12 @@ export function AgentSurface({
   /** True when there's a pending permission request — turns the strip red
    *  and shows "Agent is waiting on you". */
   awaiting?: boolean;
+  /** Session start (Date.now). Shared with the status bar so both chrome
+   *  surfaces tick off the same clock. */
+  sessionStart: number;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState<AgentTab>("Stream");
-  const sessionStartRef = useRef(Date.now());
   const [now, setNow] = useState(Date.now());
 
   const drawer = useResizable({
@@ -69,7 +72,7 @@ export function AgentSurface({
       tab={tab}
       onTab={setTab}
       onCollapse={() => setExpanded(false)}
-      sessionStart={sessionStartRef.current}
+      sessionStart={sessionStart}
       now={now}
       lastQuery={lastQuery}
       focusedTable={focusedTable}
