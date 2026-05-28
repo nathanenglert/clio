@@ -197,15 +197,19 @@ export function App() {
     [tabs, activeName, reveal],
   );
 
-  const runActive = useCallback(async () => {
-    const tab = tabs.activeTab;
-    if (!tab || !activeName) return;
-    if (!active?.connected) {
-      tabs.updateTab(tab.id, { error: "Not connected. Click a connection in the rail.", result: null });
-      return;
-    }
-    await runTabQuery(tab.id, tab.sql);
-  }, [tabs, activeName, active?.connected, runTabQuery]);
+  const runActive = useCallback(
+    async (sqlOverride?: string) => {
+      const tab = tabs.activeTab;
+      if (!tab || !activeName) return;
+      if (!active?.connected) {
+        tabs.updateTab(tab.id, { error: "Not connected. Click a connection in the rail.", result: null });
+        return;
+      }
+      const sql = sqlOverride && sqlOverride.trim().length > 0 ? sqlOverride : tab.sql;
+      await runTabQuery(tab.id, sql);
+    },
+    [tabs, activeName, active?.connected, runTabQuery],
+  );
 
   // When the reveal toggle flips, re-run the active tab's last query so the
   // user immediately sees real or fake values per the new state. Background

@@ -28,6 +28,34 @@ export type Intellisense = {
 
 const EMPTY_SCHEMA: IntellisenseSchema = Object.freeze({});
 
+// Identifiers that Postgres requires double-quoting for. lang-sql's
+// nameCompletion auto-quotes via the same regex, but only for entries it
+// builds itself (e.g. schema names); our table/column completions are built
+// here and passed in as-is, so the quoting has to happen here too.
+const PG_RESERVED_IDENTS = new Set([
+  "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric",
+  "authorization", "binary", "both", "case", "cast", "check", "collate", "column",
+  "concurrently", "constraint", "create", "cross", "current_catalog", "current_date",
+  "current_role", "current_schema", "current_time", "current_timestamp", "current_user",
+  "default", "deferrable", "desc", "distinct", "do", "else", "end", "except", "false",
+  "fetch", "for", "foreign", "freeze", "from", "full", "grant", "group", "having", "ilike",
+  "in", "initially", "inner", "intersect", "into", "is", "isnull", "join", "lateral",
+  "leading", "left", "like", "limit", "localtime", "localtimestamp", "natural", "not",
+  "notnull", "null", "offset", "on", "only", "or", "order", "outer", "overlaps", "placing",
+  "primary", "references", "returning", "right", "select", "session_user", "similar",
+  "some", "symmetric", "table", "tablesample", "then", "to", "trailing", "true", "union",
+  "unique", "user", "using", "variadic", "verbose", "when", "where", "window", "with",
+]);
+
+function identNeedsQuoting(name: string): boolean {
+  if (!/^[a-z_][a-z_\d]*$/.test(name)) return true;
+  return PG_RESERVED_IDENTS.has(name);
+}
+
+function quotedIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
 function pickDefaultSchema(schemas: string[]): string | undefined {
   if (schemas.includes("public")) return "public";
   return schemas[0];
@@ -48,11 +76,13 @@ function buildTableCompletion(t: TableSummary): Completion {
   const isViewish = t.kind === "view" || t.kind === "matview";
   const parts: string[] = [t.kind];
   if (t.row_estimate !== undefined) parts.push(`${formatRowCount(t.row_estimate)} rows`);
-  return {
+  const c: Completion = {
     label: t.name,
     type: isViewish ? "type" : "class",
     detail: parts.join("  ·  "),
   };
+  if (identNeedsQuoting(t.name)) c.apply = quotedIdent(t.name);
+  return c;
 }
 
 function buildColumnCompletion(c: ColumnDescription): Completion {
@@ -66,7 +96,7 @@ function buildColumnCompletion(c: ColumnDescription): Completion {
     c.enum_values && c.enum_values.length > 0
       ? `values: ${c.enum_values.join(", ")}`
       : undefined;
-  return {
+  const out: Completion = {
     label: c.name,
     // PK columns render with the "constant" glyph to set them apart at a glance;
     // everything else is a "property" — same icon set as object-field completion.
@@ -74,6 +104,8 @@ function buildColumnCompletion(c: ColumnDescription): Completion {
     detail,
     ...(info ? { info } : {}),
   };
+  if (identNeedsQuoting(c.name)) out.apply = quotedIdent(c.name);
+  return out;
 }
 
 export function useIntellisense(connectionName: string | null): Intellisense {
