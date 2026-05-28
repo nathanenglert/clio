@@ -3,17 +3,40 @@ import { AgentDot, Kbd, fmtRelative } from "./agentShared";
 
 type Props = {
   awaiting: boolean;
+  /** Recent MCP activity (within the active window). Drives the pulsing dot
+   *  and the "Agent active" headline. */
+  active: boolean;
+  /** Any MCP activity ever seen this session — distinguishes "no agent has
+   *  ever called us" from "agent went idle a while ago". */
+  everConnected: boolean;
   lastEvent: ActivityEvent | null;
   focusedTable: string | null;
   now: number;
   onExpand: () => void;
 };
 
-export function AgentStrip({ awaiting, lastEvent, focusedTable, now, onExpand }: Props) {
+export function AgentStrip({ awaiting, active, everConnected, lastEvent, focusedTable, now, onExpand }: Props) {
   const monoStyle: React.CSSProperties = {
     fontFamily: "var(--font-mono)",
     color: "var(--text-primary)",
   };
+  // Three resting states + the override:
+  //   awaiting        → "Agent is waiting on you" (red)
+  //   active          → "Agent active" (pulsing, accent color)
+  //   everConnected   → "Agent idle" (calm — agent ran earlier but quieted)
+  //   otherwise       → "No agent connected" (faint — no MCP traffic yet)
+  const headline = awaiting
+    ? "Agent is waiting on you"
+    : active
+      ? "Agent active"
+      : everConnected
+        ? "Agent idle"
+        : "No agent connected";
+  const headlineColor = awaiting
+    ? "var(--op-destruct)"
+    : active
+      ? "var(--agent)"
+      : "var(--text-secondary)";
   return (
     <div
       className="agent-surface agent-strip"
@@ -30,7 +53,7 @@ export function AgentStrip({ awaiting, lastEvent, focusedTable, now, onExpand }:
       }}
     >
       <span style={{ position: "relative", display: "inline-flex" }}>
-        <AgentDot pulse />
+        <AgentDot pulse={awaiting || active} />
         {awaiting && (
           <span
             style={{
@@ -43,15 +66,10 @@ export function AgentStrip({ awaiting, lastEvent, focusedTable, now, onExpand }:
           />
         )}
       </span>
-      <span
-        style={{
-          color: awaiting ? "var(--op-destruct)" : "var(--agent)",
-          fontWeight: 500,
-        }}
-      >
-        {awaiting ? "Agent is waiting on you" : "Agent active"}
-      </span>
-      <span style={{ color: "var(--text-muted)" }}>·</span>
+      <span style={{ color: headlineColor, fontWeight: 500 }}>{headline}</span>
+      {(awaiting || active || lastEvent) && (
+        <span style={{ color: "var(--text-muted)" }}>·</span>
+      )}
       <span style={{ color: "var(--text-secondary)" }}>
         {awaiting ? (
           <>step ?/? · approve a write</>
@@ -76,9 +94,7 @@ export function AgentStrip({ awaiting, lastEvent, focusedTable, now, onExpand }:
               {fmtRelative(lastEvent.ts_ms, now)}
             </span>
           </>
-        ) : (
-          <>idle · no calls yet</>
-        )}
+        ) : null}
       </span>
       <div style={{ flex: 1 }} />
       {awaiting && (
