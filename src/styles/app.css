@@ -1400,17 +1400,37 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
 
 .grid-empty {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  padding: 40px 16px;
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
+  gap: 14px;
+  padding: 56px 24px 64px;
+  color: var(--text-secondary);
+  text-align: center;
 }
 .grid-empty-glyph {
   color: var(--text-faint);
-  font-family: var(--font-mono);
-  font-size: 16px;
+  font-family: var(--font-serif);
+  font-size: 44px;
+  line-height: 1;
+  opacity: 0.55;
+}
+.grid-empty-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+.grid-empty-title {
+  font-family: var(--font-serif);
+  font-size: 17px;
+  letter-spacing: 0.005em;
+  color: var(--text-primary);
+}
+.grid-empty-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
 }
 
 /* ── Modal ─────────────────────────────────────────────────────── */
