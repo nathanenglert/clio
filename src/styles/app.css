@@ -240,7 +240,8 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
 }
 .schema-conn-caret {
   color: var(--text-muted);
-  font-size: 9px;
+  font-size: 12px;
+  line-height: 1;
   margin-left: 2px;
   transition: transform 120ms ease;
 }
@@ -468,8 +469,9 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
 }
 .schema-filter-icon {
   color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
 }
 .schema-filter-input {
   flex: 1;
@@ -526,9 +528,10 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 10px;
+  width: 14px;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 13px;
+  line-height: 1;
   transition: transform 120ms ease;
 }
 .schema-group-chev.open { transform: rotate(90deg); }
@@ -1261,8 +1264,8 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
 .sort-rail:hover { background: rgba(255, 255, 255, 0.04); }
 .sort-chev {
   display: block;
-  font-size: 9px;
-  line-height: 7px;
+  font-size: 11px;
+  line-height: 8px;
   color: var(--text-faint);
   pointer-events: none;
 }

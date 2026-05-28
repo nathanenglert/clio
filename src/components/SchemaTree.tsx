@@ -677,7 +677,10 @@ export function SchemaTree({
       {/* ── Filter ────────────────────────────────────────────────── */}
       <div className="schema-filter">
         <span className="schema-filter-icon" aria-hidden>
-          ⌕
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <circle cx="6" cy="6" r="4" stroke="currentColor" strokeWidth="1.4" />
+            <line x1="9" y1="9" x2="12.5" y2="12.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
         </span>
         <input
           ref={filterInputRef}
