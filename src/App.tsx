@@ -81,7 +81,10 @@ export function App() {
     try {
       const cs = await api.list_connections();
       setConnections(cs);
-      if (!activeName && cs.length > 0) setActiveName(cs[0].name);
+      // Functional update so the activity-listener-captured `refresh` (which
+      // closes over the mount-time `activeName === null`) can't clobber a
+      // user-driven switch that fires concurrently with a connect event.
+      setActiveName((prev) => prev ?? (cs[0]?.name ?? null));
     } catch (e) {
       console.error(e);
     }
