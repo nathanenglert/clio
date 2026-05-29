@@ -28,7 +28,7 @@ type Props = {
   onCloseTab: (id: string) => void;
   onAddTab: () => void;
   onSqlChange: (id: string, sql: string) => void;
-  onRun: () => void;
+  onRun: (sqlOverride?: string) => void;
   /** ⌘S — write-through for library tabs, else opens the save sheet. */
   onSave: () => void;
   /** ⌘⇧S — always opens the save sheet as a fresh entry. */
@@ -80,6 +80,17 @@ export function Workspace({
     max: 600,
     axis: "y",
   });
+
+  // Selection-aware run: if the editor has highlighted text, run only that;
+  // otherwise fall through to the active tab's full SQL. The current statement
+  // is intentionally not isolated yet (multi-statement intent is unclear
+  // without a real parser) — selection covers the explicit "I just want this
+  // bit" case the task targets.
+  const handleRun = useCallback(() => {
+    const sel = editorRef.current?.getSelection() ?? "";
+    if (sel.trim().length > 0) onRun(sel);
+    else onRun();
+  }, [onRun]);
 
   // ⌘E opens the Export menu when results are loaded.
   const [exportOpenSignal, setExportOpenSignal] = useState<number | undefined>(undefined);
@@ -268,7 +279,7 @@ export function Workspace({
           <>
             <button
               className="run-chip"
-              onClick={onRun}
+              onClick={handleRun}
               disabled={running || !active.connected || !activeTab}
               aria-label="Run query"
             >
@@ -327,7 +338,7 @@ export function Workspace({
           <SqlEditor
             value={activeTab.sql}
             onChange={(v) => onSqlChange(activeTab.id, v)}
-            onRun={onRun}
+            onRun={handleRun}
             onSave={onSave}
             onSaveAs={onSaveAs}
             schema={intellisense.schema}
@@ -400,7 +411,7 @@ export function Workspace({
           disabled={running || !result || !active.connected}
           aria-label="Re-run query"
           title="Re-run query"
-          onClick={onRun}
+          onClick={handleRun}
         >↻</button>
       </div>
 
