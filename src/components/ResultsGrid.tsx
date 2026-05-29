@@ -593,9 +593,14 @@ export function ResultsGrid(props: Props) {
       </table>
 
       {noRows && !editable && (
-        <div className="grid-empty">
-          <span className="grid-empty-glyph" aria-hidden>∅</span>
-          <span>Query returned no rows.</span>
+        <div className="grid-empty" role="status">
+          <span className="grid-empty-glyph" aria-hidden>○</span>
+          <div className="grid-empty-body">
+            <div className="grid-empty-title">Query succeeded · 0 rows</div>
+            <div className="grid-empty-hint mono">
+              completed in {result.elapsed_ms}ms
+            </div>
+          </div>
         </div>
       )}
     </div>
