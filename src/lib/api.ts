@@ -437,3 +437,9 @@ export function onActivity(
 ): Promise<UnlistenFn> {
   return listen<ActivityEvent>("activity", (e) => cb(e.payload));
 }
+
+export function onMcpConnection(
+  cb: (connected: boolean) => void
+): Promise<UnlistenFn> {
+  return listen<boolean>("mcp_connection", (e) => cb(e.payload));
+}

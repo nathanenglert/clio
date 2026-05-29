@@ -1,42 +1,54 @@
 import type { ActivityEvent } from "../lib/api";
-import { AgentDot, Kbd, fmtRelative } from "./agentShared";
+import { Kbd, fmtRelative } from "./agentShared";
+
+export type AgentStatus = "awaiting" | "active" | "idle" | "disconnected";
+
+/** How long after the last event the strip stays in "active" before flipping
+ *  to "idle". 60s is forgiving of pauses while the agent thinks between tool
+ *  calls without leaving the strip falsely lit for hours. */
+export const ACTIVE_WINDOW_MS = 60_000;
 
 type Props = {
-  awaiting: boolean;
-  /** Recent MCP activity (within the active window). Drives the pulsing dot
-   *  and the "Agent active" headline. */
-  active: boolean;
-  /** Any MCP activity ever seen this session — distinguishes "no agent has
-   *  ever called us" from "agent went idle a while ago". */
-  everConnected: boolean;
+  status: AgentStatus;
   lastEvent: ActivityEvent | null;
   focusedTable: string | null;
   now: number;
   onExpand: () => void;
 };
 
-export function AgentStrip({ awaiting, active, everConnected, lastEvent, focusedTable, now, onExpand }: Props) {
+export function AgentStrip({ status, lastEvent, focusedTable, now, onExpand }: Props) {
+  const awaiting = status === "awaiting";
   const monoStyle: React.CSSProperties = {
     fontFamily: "var(--font-mono)",
     color: "var(--text-primary)",
   };
-  // Three resting states + the override:
-  //   awaiting        → "Agent is waiting on you" (red)
-  //   active          → "Agent active" (pulsing, accent color)
-  //   everConnected   → "Agent idle" (calm — agent ran earlier but quieted)
-  //   otherwise       → "No agent connected" (faint — no MCP traffic yet)
-  const headline = awaiting
-    ? "Agent is waiting on you"
-    : active
-      ? "Agent active"
-      : everConnected
-        ? "Agent idle"
-        : "No agent connected";
-  const headlineColor = awaiting
-    ? "var(--op-destruct)"
-    : active
-      ? "var(--agent)"
-      : "var(--text-secondary)";
+
+  // Two-tone palette: connected → agent color (filled + pulse for active,
+  // hollow for idle); disconnected → muted; awaiting → destructive red.
+  const dotColor =
+    status === "awaiting"
+      ? "var(--op-destruct)"
+      : status === "disconnected"
+        ? "var(--text-muted)"
+        : "var(--agent)";
+  const dotFilled = status === "active" || status === "awaiting";
+  const dotPulse = status === "active";
+
+  const labelColor =
+    status === "awaiting"
+      ? "var(--op-destruct)"
+      : status === "disconnected"
+        ? "var(--text-muted)"
+        : "var(--agent)";
+  const label =
+    status === "awaiting"
+      ? "Agent is waiting on you"
+      : status === "disconnected"
+        ? "No agent connected"
+        : status === "idle"
+          ? "Agent idle"
+          : "Agent active";
+
   return (
     <div
       className="agent-surface agent-strip"
@@ -53,7 +65,18 @@ export function AgentStrip({ awaiting, active, everConnected, lastEvent, focused
       }}
     >
       <span style={{ position: "relative", display: "inline-flex" }}>
-        <AgentDot pulse={awaiting || active} />
+        <span
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: dotFilled ? dotColor : "transparent",
+            border: dotFilled ? undefined : `1.5px solid ${dotColor}`,
+            boxShadow: dotPulse ? `0 0 6px ${dotColor}` : undefined,
+            flex: "0 0 auto",
+            boxSizing: "border-box",
+          }}
+        />
         {awaiting && (
           <span
             style={{
@@ -66,36 +89,40 @@ export function AgentStrip({ awaiting, active, everConnected, lastEvent, focused
           />
         )}
       </span>
-      <span style={{ color: headlineColor, fontWeight: 500 }}>{headline}</span>
-      {(awaiting || active || lastEvent) && (
-        <span style={{ color: "var(--text-muted)" }}>·</span>
-      )}
-      <span style={{ color: "var(--text-secondary)" }}>
-        {awaiting ? (
-          <>step ?/? · approve a write</>
-        ) : focusedTable ? (
-          <>
-            looking at <span style={monoStyle}>{focusedTable}</span>
-            {lastEvent && (
+      <span style={{ color: labelColor, fontWeight: 500 }}>{label}</span>
+      {status !== "disconnected" && (
+        <>
+          <span style={{ color: "var(--text-muted)" }}>·</span>
+          <span style={{ color: "var(--text-secondary)" }}>
+            {awaiting ? (
+              <>step ?/? · approve a write</>
+            ) : focusedTable ? (
               <>
-                {" · last action "}
+                looking at <span style={monoStyle}>{focusedTable}</span>
+                {lastEvent && (
+                  <>
+                    {" · last action "}
+                    <span style={{ fontFamily: "var(--font-mono)" }}>
+                      {fmtRelative(lastEvent.ts_ms, now)}
+                    </span>
+                  </>
+                )}
+              </>
+            ) : lastEvent ? (
+              <>
+                last action{" "}
+                <span style={monoStyle}>{lastEvent.tool}</span>
+                {" · "}
                 <span style={{ fontFamily: "var(--font-mono)" }}>
                   {fmtRelative(lastEvent.ts_ms, now)}
                 </span>
               </>
+            ) : (
+              <>no calls yet</>
             )}
-          </>
-        ) : lastEvent ? (
-          <>
-            last action{" "}
-            <span style={monoStyle}>{lastEvent.tool}</span>
-            {" · "}
-            <span style={{ fontFamily: "var(--font-mono)" }}>
-              {fmtRelative(lastEvent.ts_ms, now)}
-            </span>
-          </>
-        ) : null}
-      </span>
+          </span>
+        </>
+      )}
       <div style={{ flex: 1 }} />
       {awaiting && (
         <button
