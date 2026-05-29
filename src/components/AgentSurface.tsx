@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ActivityEvent } from "../lib/api";
 import { useResizable } from "../lib/useResizable";
 import { type AgentTab, findLastByTool, parseDescribe } from "./agentShared";
-import { AgentStrip } from "./AgentStrip";
+import { AgentStrip, type AgentStatus, ACTIVE_WINDOW_MS } from "./AgentStrip";
 import { AgentDrawer } from "./AgentDrawer";
 
 export function AgentSurface({
@@ -11,6 +11,7 @@ export function AgentSurface({
   onOpenSql,
   onRerunSql,
   awaiting = false,
+  mcpConnected = false,
   sessionStart,
 }: {
   events: ActivityEvent[];
@@ -20,6 +21,10 @@ export function AgentSurface({
   /** True when there's a pending permission request — turns the strip red
    *  and shows "Agent is waiting on you". */
   awaiting?: boolean;
+  /** True while at least one MCP client is connected on the activity socket.
+   *  When false, the strip shows "No agent connected" regardless of the
+   *  event stream. */
+  mcpConnected?: boolean;
   /** Session start (Date.now). Shared with the status bar so both chrome
    *  surfaces tick off the same clock. */
   sessionStart: number;
@@ -64,15 +69,16 @@ export function AgentSurface({
     if (!parsed) return null;
     return `${parsed.schema}.${parsed.table}`;
   }, [lastDescribe]);
-  // Activity-derived agent state — drives the strip's headline. We don't have
-  // a real MCP-presence signal from the backend, so "connected" is inferred
-  // from any MCP-source event this session; "active" is a recent one. Tuned
-  // to feel responsive without flickering on each keystroke from a chatty
-  // agent.
-  const ACTIVE_WINDOW_MS = 5_000;
-  const agentEverConnected = events.length > 0;
-  const agentActive =
-    !!lastEvent && now - lastEvent.ts_ms < ACTIVE_WINDOW_MS;
+
+  // Awaiting trumps disconnected (a pending verdict is still pending even if
+  // the MCP died) — order matters here.
+  const status: AgentStatus = awaiting
+    ? "awaiting"
+    : !mcpConnected
+      ? "disconnected"
+      : lastEvent && now - lastEvent.ts_ms < ACTIVE_WINDOW_MS
+        ? "active"
+        : "idle";
 
   return expanded ? (
     <AgentDrawer
@@ -92,9 +98,7 @@ export function AgentSurface({
     />
   ) : (
     <AgentStrip
-      awaiting={awaiting}
-      active={agentActive}
-      everConnected={agentEverConnected}
+      status={status}
       lastEvent={lastEvent}
       focusedTable={focusedTable}
       now={now}

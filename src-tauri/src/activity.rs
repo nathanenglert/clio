@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter as _};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
@@ -149,6 +150,12 @@ async fn ensure_mcp_connection(
 /// previous writer. Multi-MCP scenarios (multiple agents in parallel) need
 /// per-request routing — punt to a future phase.
 pub fn spawn_socket_listener(app: AppHandle, mcp_writer: McpWriter) {
+    // Shared count of live MCP readers. The strip's "disconnected" state is
+    // driven entirely by this — > 0 means at least one MCP is connected.
+    // Multiple concurrent readers are rare (single-connection model replaces
+    // the writer on each accept) but a stale reader can briefly overlap a
+    // new one, so a counter is more honest than a boolean.
+    let active = Arc::new(AtomicUsize::new(0));
     tauri::async_runtime::spawn(async move {
         let path = match activity_socket_path() {
             Ok(p) => p,
@@ -175,7 +182,12 @@ pub fn spawn_socket_listener(app: AppHandle, mcp_writer: McpWriter) {
                 *guard = Some(write_half);
             }
 
+            active.fetch_add(1, Ordering::SeqCst);
+            let _ = app.emit("mcp_connection", true);
+
             let app = app.clone();
+            let mcp_writer = mcp_writer.clone();
+            let active = active.clone();
             tauri::async_runtime::spawn(async move {
                 let mut lines = BufReader::new(read_half).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -196,6 +208,15 @@ pub fn spawn_socket_listener(app: AppHandle, mcp_writer: McpWriter) {
                         }
                     }
                 }
+                let remaining = active.fetch_sub(1, Ordering::SeqCst) - 1;
+                if remaining == 0 {
+                    // Last reader exited — no MCP is connected. Clear the
+                    // writer slot so resolve_permission fails fast instead
+                    // of writing into a dead socket.
+                    let mut guard = mcp_writer.lock().await;
+                    *guard = None;
+                }
+                let _ = app.emit("mcp_connection", remaining > 0);
                 tracing::info!("ui bridge: connection closed");
             });
         }

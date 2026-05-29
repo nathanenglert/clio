@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   api,
   onActivity,
+  onMcpConnection,
   type ActivityEvent,
   type Connection,
   type MigrationRequest,
@@ -55,6 +56,7 @@ export function App() {
     useState<MigrationRequest | null>(null);
   const [policyOpen, setPolicyOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [mcpConnected, setMcpConnected] = useState(false);
 
   // Bridge from the once-mounted activity listener (closure capture) to the
   // live `tabs` API — populated below after useTabs runs. Used so
@@ -136,6 +138,13 @@ export function App() {
       unlisten.then((u) => u());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const unlisten = onMcpConnection(setMcpConnected);
+    return () => {
+      unlisten.then((u) => u());
+    };
   }, []);
 
   const active = connections.find((c) => c.name === activeName) ?? null;
@@ -676,6 +685,7 @@ export function App() {
         onOpenSql={onAgentOpen}
         onRerunSql={onAgentRerun}
         awaiting={!!pendingPermission || !!pendingMigration}
+        mcpConnected={mcpConnected}
         sessionStart={sessionStartRef.current}
       />
       {hasTrayWork && trayBatch && trayTab && (
