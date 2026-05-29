@@ -64,6 +64,15 @@ export function AgentSurface({
     if (!parsed) return null;
     return `${parsed.schema}.${parsed.table}`;
   }, [lastDescribe]);
+  // Activity-derived agent state — drives the strip's headline. We don't have
+  // a real MCP-presence signal from the backend, so "connected" is inferred
+  // from any MCP-source event this session; "active" is a recent one. Tuned
+  // to feel responsive without flickering on each keystroke from a chatty
+  // agent.
+  const ACTIVE_WINDOW_MS = 5_000;
+  const agentEverConnected = events.length > 0;
+  const agentActive =
+    !!lastEvent && now - lastEvent.ts_ms < ACTIVE_WINDOW_MS;
 
   return expanded ? (
     <AgentDrawer
@@ -84,6 +93,8 @@ export function AgentSurface({
   ) : (
     <AgentStrip
       awaiting={awaiting}
+      active={agentActive}
+      everConnected={agentEverConnected}
       lastEvent={lastEvent}
       focusedTable={focusedTable}
       now={now}
