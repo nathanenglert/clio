@@ -259,6 +259,9 @@ export function SchemaTree({
             onConnectingChange?.(null);
           }
         }
+        // onSelect after the await so a failed connect leaves the previous
+        // active in place — the inline error is shown in the popover and
+        // the workspace keeps the user's current context.
         onSelect(c.name);
       }
       onChanged();
