@@ -165,3 +165,46 @@ impl Core {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// The core safety invariant: an agent-access core can NEVER open a pool —
+    /// it only sees pools a human already opened. With nothing open, every
+    /// agent pool acquisition fails closed with "not connected", while the
+    /// human core instead goes down the auto-open path (a different failure).
+    #[tokio::test]
+    async fn agent_core_cannot_open_a_pool() {
+        let meta = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let emit: EmitFn = Arc::new(|_| {});
+        let (human, agent) = Core::ui_with_agent(meta, PoolRegistry::default(), emit);
+
+        let agent_err = agent.pool("anything").await.unwrap_err().to_string();
+        assert!(
+            agent_err.contains("not connected"),
+            "agent path must fail closed, got: {agent_err}"
+        );
+
+        // The human path does not hit the "not connected" guard — it tries to
+        // open (and errors elsewhere, since the in-memory meta has no rows).
+        let human_err = human.pool("anything").await.unwrap_err().to_string();
+        assert!(
+            !human_err.contains("not connected"),
+            "human path must attempt to open, got: {human_err}"
+        );
+    }
+
+    /// Per-agent attribution: `for_agent` tags activity/permission requests so
+    /// the UI can tell concurrent agents apart.
+    #[tokio::test]
+    async fn for_agent_tags_attribution() {
+        let meta = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let emit: EmitFn = Arc::new(|_| {});
+        let (_human, agent) = Core::ui_with_agent(meta, PoolRegistry::default(), emit);
+        assert_eq!(agent.agent_id, None);
+        let tagged = agent.for_agent("agent-7".into(), "Claude Code".into());
+        assert_eq!(tagged.agent_id.as_deref(), Some("agent-7"));
+    }
+}
