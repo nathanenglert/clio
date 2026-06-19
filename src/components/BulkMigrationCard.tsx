@@ -3,6 +3,8 @@ import type { MigrationRequest, MigrationVerdict } from "../lib/api";
 
 type Props = {
   request: MigrationRequest;
+  /** Display name of the requesting agent, resolved from the presence roster. */
+  agentLabel?: string;
   onResolve: (verdict: MigrationVerdict) => void;
 };
 
@@ -11,7 +13,7 @@ type Props = {
 /// (with a transaction toggle) or reject outright. Deviations are
 /// highlighted; if any statement is BLOCKED outright, the approve button
 /// is disabled.
-export function BulkMigrationCard({ request, onResolve }: Props) {
+export function BulkMigrationCard({ request, agentLabel, onResolve }: Props) {
   const [wrapInTx, setWrapInTx] = useState(true);
 
   const counts = useMemo(() => {
@@ -76,6 +78,23 @@ export function BulkMigrationCard({ request, onResolve }: Props) {
           {request.statements.length === 1 ? "" : "s"} · {totalTables} table
           {totalTables === 1 ? "" : "s"}
         </span>
+        {agentLabel && (
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              color: "var(--agent)",
+              fontSize: 11,
+            }}
+          >
+            <span
+              aria-hidden
+              style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--agent)" }}
+            />
+            {agentLabel}
+          </span>
+        )}
         <div style={{ flex: 1 }} />
         <span className="mono" style={{ color: "var(--text-muted)", fontSize: 11 }}>
           {counts.allow}A · {counts.prompt}P{counts.block > 0 && ` · ${counts.block}B`}

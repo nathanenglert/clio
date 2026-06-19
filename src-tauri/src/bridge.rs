@@ -414,15 +414,11 @@ async fn dispatch(core: &Core, call: ToolCall) -> Result<Value> {
     let v = match call {
         ListConnections => serde_json::to_value(core::list_connections(core).await?)?,
         Connect { connection } => {
-            // The agent cannot open a connection. Report state only; Phase 5
-            // turns the "not connected" branch into a human-approval request.
-            if core.pools.is_connected(&connection).await {
-                serde_json::json!({ "connected": connection })
-            } else {
-                return Err(anyhow!(
-                    "not connected: ask the human to connect '{connection}' in the workbench"
-                ));
-            }
+            // The agent cannot open a connection. If it's already open this is
+            // a no-op; otherwise the human is asked to approve, and only the
+            // human core opens the pool. Blocks until they decide.
+            core::request_connect(core, &connection).await?;
+            serde_json::json!({ "connected": connection })
         }
         ListSchemas { connection } => serde_json::to_value(core::list_schemas(core, &connection).await?)?,
         ListTables { connection, schema } => {

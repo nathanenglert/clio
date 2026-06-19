@@ -2,8 +2,9 @@ use anyhow::Result;
 use std::time::Instant;
 
 use crate::connections;
-use crate::types::{ClassifyOutcome, Connection, NewConnectionInput};
+use crate::types::{ActivityEvent, ClassifyOutcome, Connection, NewConnectionInput};
 
+use super::permission::ConnectRequest;
 use super::Core;
 
 pub async fn list_connections(core: &Core) -> Result<Vec<Connection>> {
@@ -54,6 +55,41 @@ pub async fn connect(core: &Core, name: &str) -> Result<Option<ClassifyOutcome>>
     .await;
     core.record_ok("connect", name, started, &r);
     r
+}
+
+/// Agent-initiated connect. A human must approve before any pool opens. If the
+/// database is already connected this is a no-op success. Otherwise it
+/// registers a pending request, surfaces a `connect_required` card on the
+/// activity stream, and blocks until the human approves — at which point the
+/// *human* core opens the pool in `resolve_connect` — or declines. The agent
+/// core itself can never open a pool (`PoolAccess::Agent`).
+pub async fn request_connect(core: &Core, connection: &str) -> Result<()> {
+    if core.pools.is_connected(connection).await {
+        return Ok(());
+    }
+    let (id, rx) = core.pending_connects.register(connection.to_string()).await;
+    let payload = serde_json::to_string(&ConnectRequest {
+        id: id.clone(),
+        connection: connection.to_string(),
+        agent_id: core.agent_id.clone(),
+    })
+    .ok();
+    let evt = ActivityEvent::new(
+        &core.source,
+        "connect_required",
+        format!("connect to {connection}"),
+        "pending",
+        0,
+    )
+    .with_payload(payload)
+    .with_agent(core.agent_id.clone());
+    (core.emit)(evt);
+
+    match rx.await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(anyhow::anyhow!("the human declined to connect '{connection}'")),
+        Err(_) => Err(anyhow::anyhow!("connect request was cancelled before a decision")),
+    }
 }
 
 /// Surface an agent's proposed query to the human as a new (un-run) tab.

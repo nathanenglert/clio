@@ -137,6 +137,8 @@ export type ActivityEvent = {
   id: string;
   ts_ms: number;
   source: "ui" | "mcp";
+  /** Which agent produced this event (source === "mcp"). Absent for UI. */
+  agent_id?: string;
   tool: string;
   detail: string;
   status: "ok" | "error" | "pending";
@@ -295,6 +297,8 @@ export type PermissionTarget = {
 export type PermissionRequest = {
   id: string;
   source: "ui" | "mcp";
+  /** Which agent raised this request; resolves to a label via the roster. */
+  agent_id?: string;
   sql: string;
   intent?: string;
   /** `read | write | ddl | destruct` */
@@ -353,6 +357,8 @@ export type MigrationStatement = {
 export type MigrationRequest = {
   id: string;
   source: "ui" | "mcp";
+  /** Which agent raised this request; resolves to a label via the roster. */
+  agent_id?: string;
   intent?: string;
   statements: MigrationStatement[];
 };
@@ -360,6 +366,30 @@ export type MigrationRequest = {
 export type MigrationVerdict =
   | { kind: "approve_and_prompt"; wrap_in_transaction: boolean }
   | { kind: "reject" };
+
+// ── Connect approval ─────────────────────────────────────────────
+// An agent cannot open a database connection — a human must. The agent's
+// `connect` tool surfaces this on a `connect_required` activity event; the
+// human approves via `resolve_connect`, and only then does the UI open the
+// pool. Mirrors src-tauri/src/core/permission.rs ConnectRequest.
+
+export type ConnectRequest = {
+  id: string;
+  /** Saved-connection name the agent wants opened. */
+  connection: string;
+  /** Which agent is asking; resolves to a label via the roster. */
+  agent_id?: string;
+};
+
+// ── Agent presence ───────────────────────────────────────────────
+// Live roster of connected agents, pushed on the `agent_presence` event each
+// time an agent connects or disconnects. Mirrors src-tauri/src/bridge.rs.
+
+export type AgentInfo = {
+  id: string;
+  label: string;
+  since_ms: number;
+};
 
 export const api = {
   list_connections: () => invoke<Connection[]>("list_connections"),
@@ -428,6 +458,8 @@ export const api = {
     invoke<void>("resolve_permission", { id, verdict }),
   resolve_migration: (id: string, verdict: MigrationVerdict) =>
     invoke<void>("resolve_migration", { id, verdict }),
+  resolve_connect: (id: string, approve: boolean) =>
+    invoke<void>("resolve_connect", { id, approve }),
   list_policy_rules: (connection: string | null = null) =>
     invoke<PolicyRule[]>("list_policy_rules", { connection }),
 };
@@ -442,4 +474,14 @@ export function onMcpConnection(
   cb: (connected: boolean) => void
 ): Promise<UnlistenFn> {
   return listen<boolean>("mcp_connection", (e) => cb(e.payload));
+}
+
+/** Subscribe to the agent roster. Fires the full current list on every
+ *  connect/disconnect. */
+export function onAgentPresence(
+  cb: (agents: AgentInfo[]) => void
+): Promise<UnlistenFn> {
+  return listen<{ agents: AgentInfo[] }>("agent_presence", (e) =>
+    cb(e.payload.agents),
+  );
 }

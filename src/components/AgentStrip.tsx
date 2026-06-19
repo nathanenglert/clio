@@ -1,4 +1,4 @@
-import type { ActivityEvent } from "../lib/api";
+import type { ActivityEvent, AgentInfo } from "../lib/api";
 import { Kbd, fmtRelative } from "./agentShared";
 
 export type AgentStatus = "awaiting" | "active" | "idle" | "disconnected";
@@ -10,13 +10,14 @@ export const ACTIVE_WINDOW_MS = 60_000;
 
 type Props = {
   status: AgentStatus;
+  agents?: AgentInfo[];
   lastEvent: ActivityEvent | null;
   focusedTable: string | null;
   now: number;
   onExpand: () => void;
 };
 
-export function AgentStrip({ status, lastEvent, focusedTable, now, onExpand }: Props) {
+export function AgentStrip({ status, agents = [], lastEvent, focusedTable, now, onExpand }: Props) {
   const awaiting = status === "awaiting";
   const monoStyle: React.CSSProperties = {
     fontFamily: "var(--font-mono)",
@@ -40,14 +41,20 @@ export function AgentStrip({ status, lastEvent, focusedTable, now, onExpand }: P
       : status === "disconnected"
         ? "var(--text-muted)"
         : "var(--agent)";
+  const count = agents.length;
+  const names = agents.map((a) => a.label);
+  const stateWord = status === "idle" ? "idle" : "active";
   const label =
     status === "awaiting"
       ? "Agent is waiting on you"
-      : status === "disconnected"
+      : status === "disconnected" || count === 0
         ? "No agent connected"
-        : status === "idle"
-          ? "Agent idle"
-          : "Agent active";
+        : count === 1
+          ? `${names[0]} ${stateWord}`
+          : `${count} agents connected`;
+  // With more than one agent, the single-focus detail ("looking at X") is
+  // ambiguous, so the detail area lists the roster instead.
+  const multi = count > 1 && status !== "awaiting";
 
   return (
     <div
@@ -94,7 +101,9 @@ export function AgentStrip({ status, lastEvent, focusedTable, now, onExpand }: P
         <>
           <span style={{ color: "var(--text-muted)" }}>·</span>
           <span style={{ color: "var(--text-secondary)" }}>
-            {awaiting ? (
+            {multi ? (
+              <span style={monoStyle}>{names.join(" · ")}</span>
+            ) : awaiting ? (
               <>step ?/? · approve a write</>
             ) : focusedTable ? (
               <>

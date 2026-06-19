@@ -22,6 +22,7 @@ pub use execute::{execute_migration, execute_statement};
 pub use export::{export_query, write_file};
 pub use lifecycle::{
     add_connection, connect, delete_connection, disconnect, list_connections, propose_query,
+    request_connect,
 };
 pub use mutations::apply_mutations;
 pub use query::{run_query, run_sql};
@@ -30,7 +31,7 @@ pub use schema::{describe_table, list_schemas, list_tables, search_columns};
 pub use sensitivity::{classify_schema, list_classifications, update_classification};
 pub use snippets::{delete_snippet, list_snippets, upsert_snippet};
 
-use permission::{PendingMigrations, PendingPermissions};
+use permission::{PendingConnects, PendingMigrations, PendingPermissions};
 use redactor::RedactorCache;
 
 /// Container the UI- and MCP-mode entry points both hand to core fns.
@@ -59,6 +60,9 @@ pub struct Core {
     /// Pending bulk migrations awaiting a UI verdict. Populated by
     /// `execute_migration`; drained by the `resolve_migration` Tauri command.
     pub(crate) pending_migrations: PendingMigrations,
+    /// Pending connect-approval requests. Populated by `request_connect` (the
+    /// agent's `connect` tool); drained by the `resolve_connect` command.
+    pub(crate) pending_connects: PendingConnects,
 }
 
 impl Core {
@@ -71,6 +75,7 @@ impl Core {
     pub fn ui_with_agent(meta: SqlitePool, pools: PoolRegistry, emit: EmitFn) -> (Core, Core) {
         let pending_permissions = PendingPermissions::default();
         let pending_migrations = PendingMigrations::default();
+        let pending_connects = PendingConnects::default();
         let redactor_cache = RedactorCache::default();
         let human = Core {
             meta: meta.clone(),
@@ -82,6 +87,7 @@ impl Core {
             redactor_cache: redactor_cache.clone(),
             pending_permissions: pending_permissions.clone(),
             pending_migrations: pending_migrations.clone(),
+            pending_connects: pending_connects.clone(),
         };
         let agent = Core {
             meta,
@@ -93,6 +99,7 @@ impl Core {
             redactor_cache,
             pending_permissions,
             pending_migrations,
+            pending_connects,
         };
         (human, agent)
     }

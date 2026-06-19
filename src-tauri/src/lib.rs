@@ -208,6 +208,35 @@ async fn resolve_migration(
     state.pending_migrations.resolve(&id, verdict).await
 }
 
+/// Frontend → backend channel for approving/declining an agent's request to
+/// open a database connection. `id` comes from the `connect_required` activity
+/// event. On approve, the human (UI) core actually opens the pool here — the
+/// agent core never can — then the agent's parked `connect` call unblocks.
+#[tauri::command]
+async fn resolve_connect(
+    state: State<'_, Core>,
+    id: String,
+    approve: bool,
+) -> Result<(), String> {
+    let (connection, tx) = state
+        .pending_connects
+        .take(&id)
+        .await
+        .ok_or_else(|| format!("no pending connect request with id {id}"))?;
+    // Open the pool on the human core before signalling success, so the
+    // agent's follow-up queries find it connected.
+    let opened = if approve {
+        core::connect(&state, &connection).await.is_ok()
+    } else {
+        false
+    };
+    let _ = tx.send(opened);
+    if approve && !opened {
+        return Err(format!("failed to open connection '{connection}'"));
+    }
+    Ok(())
+}
+
 /// Returns the active policy ruleset surfaced by `execute_statement` and
 /// `execute_migration`. Phase 5 ships with the default ruleset only; per-
 /// connection overrides + session overrides land in a follow-up. The
@@ -594,6 +623,7 @@ pub fn run() {
             set_reveal_sensitive,
             resolve_permission,
             resolve_migration,
+            resolve_connect,
             list_policy_rules,
         ])
         .run(tauri::generate_context!())

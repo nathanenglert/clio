@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ActivityEvent } from "../lib/api";
+import type { ActivityEvent, AgentInfo } from "../lib/api";
 import { useResizable } from "../lib/useResizable";
 import { type AgentTab, findLastByTool, parseDescribe } from "./agentShared";
 import { AgentStrip, type AgentStatus, ACTIVE_WINDOW_MS } from "./AgentStrip";
@@ -11,6 +11,7 @@ export function AgentSurface({
   onOpenSql,
   onRerunSql,
   awaiting = false,
+  agents = [],
   mcpConnected = false,
   sessionStart,
 }: {
@@ -21,6 +22,8 @@ export function AgentSurface({
   /** True when there's a pending permission request — turns the strip red
    *  and shows "Agent is waiting on you". */
   awaiting?: boolean;
+  /** Roster of connected agents. Drives the strip's count/name label. */
+  agents?: AgentInfo[];
   /** True while at least one MCP client is connected on the activity socket.
    *  When false, the strip shows "No agent connected" regardless of the
    *  event stream. */
@@ -99,6 +102,7 @@ export function AgentSurface({
   ) : (
     <AgentStrip
       status={status}
+      agents={agents}
       lastEvent={lastEvent}
       focusedTable={focusedTable}
       now={now}

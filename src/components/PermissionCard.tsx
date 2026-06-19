@@ -5,6 +5,8 @@ type Mode = "view" | "modify";
 
 type Props = {
   request: PermissionRequest;
+  /** Display name of the requesting agent, resolved from the presence roster. */
+  agentLabel?: string;
   onResolve: (verdict: PermissionVerdict) => void;
 };
 
@@ -13,7 +15,7 @@ type Props = {
 /// Surfaces a single statement awaiting human approval. The card lives at
 /// the bottom of the workspace (above the AgentStrip) until the user picks
 /// Allow / Deny / Modify. Keyboard: ⏎ allow, Esc deny, ⌘E modify.
-export function PermissionCard({ request, onResolve }: Props) {
+export function PermissionCard({ request, agentLabel, onResolve }: Props) {
   const [mode, setMode] = useState<Mode>("view");
   const [modifiedSql, setModifiedSql] = useState(request.sql);
   const modifyRef = useRef<HTMLTextAreaElement | null>(null);
@@ -97,6 +99,23 @@ export function PermissionCard({ request, onResolve }: Props) {
         >
           Permission required · {opLabel}
         </span>
+        {agentLabel && (
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              color: "var(--agent)",
+              fontSize: 11,
+            }}
+          >
+            <span
+              aria-hidden
+              style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--agent)" }}
+            />
+            {agentLabel}
+          </span>
+        )}
         <div style={{ flex: 1 }} />
         <span
           className="mono"

@@ -4,8 +4,10 @@ import { listen } from "@tauri-apps/api/event";
 import {
   api,
   onActivity,
-  onMcpConnection,
+  onAgentPresence,
   type ActivityEvent,
+  type AgentInfo,
+  type ConnectRequest,
   type Connection,
   type MigrationRequest,
   type MigrationVerdict,
@@ -17,6 +19,7 @@ import { Workspace } from "./components/Workspace";
 import { AgentSurface } from "./components/AgentSurface";
 import { PermissionCard } from "./components/PermissionCard";
 import { BulkMigrationCard } from "./components/BulkMigrationCard";
+import { ConnectCard } from "./components/ConnectCard";
 import { PolicyModal } from "./components/PolicyModal";
 import { ShortcutsOverlay } from "./components/ShortcutsOverlay";
 import { AddConnectionModal } from "./components/AddConnectionModal";
@@ -40,6 +43,13 @@ import type { SavedQuery } from "./lib/api";
 import { useReveal } from "./lib/useReveal";
 import { isEmpty as batchIsEmpty } from "./lib/editing";
 
+/** A human-approval request awaiting a verdict. All three carry an `id` and an
+ *  optional `agent_id` so the card can attribute the ask to a specific agent. */
+type Pending =
+  | { kind: "permission"; req: PermissionRequest }
+  | { kind: "migration"; req: MigrationRequest }
+  | { kind: "connect"; req: ConnectRequest };
+
 export function App() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [activeName, setActiveName] = useState<string | null>(null);
@@ -47,16 +57,15 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [sensitivityFor, setSensitivityFor] = useState<string | null>(null);
-  // Single-pending model for now — the design supports multiple in a queue
-  // but the activity stream only ever has one card surfaced at a time. New
-  // requests replace the visible one; Phase 4 (bulk migration) revisits.
-  const [pendingPermission, setPendingPermission] =
-    useState<PermissionRequest | null>(null);
-  const [pendingMigration, setPendingMigration] =
-    useState<MigrationRequest | null>(null);
+  // Pending human-approval requests, FIFO. With multiple agents connected,
+  // several can be outstanding at once (a write prompt from one, a connect
+  // request from another) — we surface the head and badge the rest, rather
+  // than dropping any. Each carries the originating agent for attribution.
+  const [pending, setPending] = useState<Pending[]>([]);
   const [policyOpen, setPolicyOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [mcpConnected, setMcpConnected] = useState(false);
+  // Live roster of connected agents (from the `agent_presence` event).
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
 
   // Bridge from the once-mounted activity listener (closure capture) to the
   // live `tabs` API — populated below after useTabs runs. Used so
@@ -99,10 +108,14 @@ export function App() {
       if (e.tool === "connect" || e.tool === "disconnect" || e.tool === "add_connection" || e.tool === "delete_connection") {
         refresh();
       }
+      // Enqueue approval requests (dedup by id). Inlined functional updates so
+      // the once-mounted listener never closes over stale state.
       if (e.tool === "permission_required" && e.payload) {
         try {
           const req = JSON.parse(e.payload) as PermissionRequest;
-          setPendingPermission(req);
+          setPending((prev) =>
+            prev.some((p) => p.req.id === req.id) ? prev : [...prev, { kind: "permission", req }],
+          );
         } catch (parseErr) {
           console.error("permission_required: bad payload", parseErr);
         }
@@ -110,9 +123,21 @@ export function App() {
       if (e.tool === "migration_required" && e.payload) {
         try {
           const req = JSON.parse(e.payload) as MigrationRequest;
-          setPendingMigration(req);
+          setPending((prev) =>
+            prev.some((p) => p.req.id === req.id) ? prev : [...prev, { kind: "migration", req }],
+          );
         } catch (parseErr) {
           console.error("migration_required: bad payload", parseErr);
+        }
+      }
+      if (e.tool === "connect_required" && e.payload) {
+        try {
+          const req = JSON.parse(e.payload) as ConnectRequest;
+          setPending((prev) =>
+            prev.some((p) => p.req.id === req.id) ? prev : [...prev, { kind: "connect", req }],
+          );
+        } catch (parseErr) {
+          console.error("connect_required: bad payload", parseErr);
         }
       }
       if (e.tool === "propose_query" && e.source === "mcp" && e.payload) {
@@ -141,13 +166,25 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const unlisten = onMcpConnection(setMcpConnected);
+    const unlisten = onAgentPresence(setAgents);
     return () => {
       unlisten.then((u) => u());
     };
   }, []);
 
   const active = connections.find((c) => c.name === activeName) ?? null;
+  const mcpConnected = agents.length > 0;
+  // Head of the approval queue is the card currently surfaced; the rest are
+  // badged as "+N waiting". Resolving the head reveals the next.
+  const head = pending[0] ?? null;
+  const labelFor = useCallback(
+    (agentId?: string) => agents.find((a) => a.id === agentId)?.label ?? "Agent",
+    [agents],
+  );
+  const dropPending = useCallback(
+    (id: string) => setPending((prev) => prev.filter((p) => p.req.id !== id)),
+    [],
+  );
   const reveal = useReveal();
   const tabs = useTabs(activeName);
   // Keep the activity-listener-facing ref pointed at the latest tabs API. The
@@ -644,47 +681,83 @@ export function App() {
           }}
         />
       </div>
-      {pendingPermission ? (
-        <PermissionCard
-          request={pendingPermission}
-          onResolve={async (verdict: PermissionVerdict) => {
-            const req = pendingPermission;
-            setPendingPermission(null);
-            try {
-              await api.resolve_permission(req.id, verdict);
-            } catch (err) {
-              showToast(
-                <span>Couldn&apos;t resolve permission: {String(err)}</span>,
-                "err",
-              );
-              setPendingPermission(req);
-            }
-          }}
-        />
-      ) : pendingMigration ? (
-        <BulkMigrationCard
-          request={pendingMigration}
-          onResolve={async (verdict: MigrationVerdict) => {
-            const req = pendingMigration;
-            setPendingMigration(null);
-            try {
-              await api.resolve_migration(req.id, verdict);
-            } catch (err) {
-              showToast(
-                <span>Couldn&apos;t resolve migration: {String(err)}</span>,
-                "err",
-              );
-              setPendingMigration(req);
-            }
-          }}
-        />
-      ) : null}
+      {head && (
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          {pending.length > 1 && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "4px 16px",
+                fontSize: 11,
+                color: "var(--text-muted)",
+                background: "var(--bg-elevated)",
+                borderTop: "1px solid var(--line-soft)",
+              }}
+            >
+              <span aria-hidden style={{ color: "var(--agent)" }}>◆</span>
+              {pending.length - 1} more request{pending.length - 1 === 1 ? "" : "s"} waiting
+            </div>
+          )}
+          {head.kind === "permission" ? (
+            <PermissionCard
+              request={head.req}
+              agentLabel={labelFor(head.req.agent_id)}
+              onResolve={async (verdict: PermissionVerdict) => {
+                const req = head.req;
+                dropPending(req.id);
+                try {
+                  await api.resolve_permission(req.id, verdict);
+                } catch (err) {
+                  showToast(<span>Couldn&apos;t resolve permission: {String(err)}</span>, "err");
+                  setPending((prev) =>
+                    prev.some((p) => p.req.id === req.id) ? prev : [{ kind: "permission", req }, ...prev],
+                  );
+                }
+              }}
+            />
+          ) : head.kind === "migration" ? (
+            <BulkMigrationCard
+              request={head.req}
+              agentLabel={labelFor(head.req.agent_id)}
+              onResolve={async (verdict: MigrationVerdict) => {
+                const req = head.req;
+                dropPending(req.id);
+                try {
+                  await api.resolve_migration(req.id, verdict);
+                } catch (err) {
+                  showToast(<span>Couldn&apos;t resolve migration: {String(err)}</span>, "err");
+                  setPending((prev) =>
+                    prev.some((p) => p.req.id === req.id) ? prev : [{ kind: "migration", req }, ...prev],
+                  );
+                }
+              }}
+            />
+          ) : (
+            <ConnectCard
+              request={head.req}
+              agentLabel={labelFor(head.req.agent_id)}
+              onResolve={async (approve: boolean) => {
+                const req = head.req;
+                dropPending(req.id);
+                try {
+                  await api.resolve_connect(req.id, approve);
+                } catch (err) {
+                  showToast(<span>Couldn&apos;t resolve connection request: {String(err)}</span>, "err");
+                }
+              }}
+            />
+          )}
+        </div>
+      )}
       <AgentSurface
         events={agentEvents}
         recentQueries={recentQueries}
         onOpenSql={onAgentOpen}
         onRerunSql={onAgentRerun}
-        awaiting={!!pendingPermission || !!pendingMigration}
+        awaiting={pending.length > 0}
+        agents={agents}
         mcpConnected={mcpConnected}
         sessionStart={sessionStartRef.current}
       />
