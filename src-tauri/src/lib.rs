@@ -643,8 +643,11 @@ pub fn run_mcp() {
         // already opened. If the UI isn't running, the proxy call fails (and
         // retries on the next call), so an agent can do nothing until a human
         // launches the workbench and connects.
-        let label = std::env::var("DBAPP_AGENT_LABEL").unwrap_or_else(|_| "Agent".to_string());
-        let server = mcp::McpServer::new(ProxyClient::new(label));
+        // "Agent" is only a pre-handshake fallback; the real client identity
+        // (Claude Code / Cursor / …) is captured from the MCP `initialize`
+        // handshake and set on the proxy before its first connect — see
+        // McpServer::initialize.
+        let server = mcp::McpServer::new(ProxyClient::new("Agent".into()));
         let service = match server.serve(stdio()).await {
             Ok(s) => s,
             Err(e) => {

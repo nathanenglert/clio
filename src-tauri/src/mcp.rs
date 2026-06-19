@@ -8,6 +8,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     schemars,
+    service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router,
     ErrorData as McpError, ServerHandler,
 };
@@ -212,6 +213,32 @@ impl McpServer {
 
 #[tool_handler]
 impl ServerHandler for McpServer {
+    /// Capture the real client identity from the MCP handshake so the
+    /// workbench's agent roster shows "Claude Code" / "Cursor" / etc. instead
+    /// of a generic label. The handshake always precedes the first tool call
+    /// (which is what lazily opens the proxy socket), so the captured name is
+    /// in place before the Hello frame is sent. Preserves the default
+    /// `set_peer_info` behavior the rest of rmcp relies on.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        let info = &request.client_info;
+        let label = info
+            .title
+            .clone()
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| info.name.clone());
+        if !label.is_empty() {
+            self.proxy.set_label(label);
+        }
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        Ok(self.get_info())
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()

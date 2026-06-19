@@ -123,7 +123,11 @@ fn now_ms() -> u64 {
 /// workbench and connects.
 #[derive(Clone)]
 pub struct ProxyClient {
-    label: String,
+    /// Display name sent in the Hello frame. Starts as a fallback and is
+    /// replaced with the real client identity once the MCP `initialize`
+    /// handshake lands (see `McpServer::initialize`). Shared + mutable because
+    /// initialize always runs before the lazy connect that reads it.
+    label: Arc<std::sync::Mutex<String>>,
     /// Socket to dial. `None` ⇒ the default `activity_socket_path()`; tests
     /// inject a temp path.
     path: Option<std::path::PathBuf>,
@@ -141,7 +145,19 @@ type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<std::result::Result<Val
 
 impl ProxyClient {
     pub fn new(label: String) -> Self {
-        Self { label, path: None, conn: Arc::new(Mutex::new(None)) }
+        Self {
+            label: Arc::new(std::sync::Mutex::new(label)),
+            path: None,
+            conn: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Set the agent's display label. Called from the MCP `initialize`
+    /// handshake with the client's real identity (Claude Code / Cursor / …).
+    pub fn set_label(&self, label: String) {
+        if let Ok(mut g) = self.label.lock() {
+            *g = label;
+        }
     }
 
     /// Run a tool call against the UI. Establishes the socket on first use and
@@ -180,7 +196,12 @@ impl ProxyClient {
             .await
             .map_err(|e| anyhow!("workbench not running (no activity socket): {e}"))?;
 
-        write_frame(&mut stream, &WireMsg::Hello { protocol: PROTOCOL, agent_label: self.label.clone() })
+        let label = self
+            .label
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| "Agent".to_string());
+        write_frame(&mut stream, &WireMsg::Hello { protocol: PROTOCOL, agent_label: label })
             .await
             .map_err(|e| anyhow!("handshake write failed: {e}"))?;
         let agent_id = match read_frame(&mut stream).await {
@@ -531,7 +552,11 @@ mod tests {
             }
         });
 
-        let client = ProxyClient { label: "t".into(), path: Some(path.clone()), conn: Arc::new(Mutex::new(None)) };
+        let client = ProxyClient {
+            label: Arc::new(std::sync::Mutex::new("t".into())),
+            path: Some(path.clone()),
+            conn: Arc::new(Mutex::new(None)),
+        };
         // Fire 25 concurrent calls, each tagged with a distinct connection.
         let mut handles = Vec::new();
         for i in 0..25 {
@@ -548,6 +573,41 @@ mod tests {
 
         drop(client);
         server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The label set from the MCP initialize handshake (`set_label`) must
+    /// override the construction fallback in the Hello frame.
+    #[tokio::test]
+    async fn set_label_flows_into_hello() {
+        let path = std::env::temp_dir().join(format!("dbb-hello-{}.sock", uuid::Uuid::new_v4().simple()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut read, mut write) = stream.into_split();
+            let label = match read_frame(&mut read).await.unwrap().unwrap() {
+                WireMsg::Hello { agent_label, .. } => agent_label,
+                other => panic!("expected Hello, got {other:?}"),
+            };
+            write_frame(&mut write, &WireMsg::Welcome { agent_id: "a1".into() }).await.unwrap();
+            if let Ok(Some(WireMsg::Request { request_id, .. })) = read_frame(&mut read).await {
+                let _ = write_frame(&mut write, &WireMsg::Response { request_id, result: serde_json::json!(null) }).await;
+            }
+            label
+        });
+
+        let client = ProxyClient {
+            label: Arc::new(std::sync::Mutex::new("Agent".into())),
+            path: Some(path.clone()),
+            conn: Arc::new(Mutex::new(None)),
+        };
+        client.set_label("Cursor".into()); // as McpServer::initialize would
+        let _ = client.call(ToolCall::ListConnections).await;
+
+        let label = server.await.unwrap();
+        assert_eq!(label, "Cursor", "Hello must carry the handshake-set label, not the fallback");
         let _ = std::fs::remove_file(&path);
     }
 }
