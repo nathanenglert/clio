@@ -682,7 +682,7 @@ export function App() {
         />
       </div>
       {head && (
-        <div style={{ display: "flex", flexDirection: "column" }}>
+        <div style={{ gridArea: "permission", display: "flex", flexDirection: "column", minWidth: 0 }}>
           {pending.length > 1 && (
             <div
               style={{
