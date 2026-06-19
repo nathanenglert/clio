@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use activity::{mcp_bridge, send_verdict_to_mcp, spawn_socket_listener, tauri_emitter, McpWriter};
 use core::Core;
-use pool::PoolRegistry;
+use pool::{PoolAccess, PoolRegistry};
 use rmcp::{transport::stdio, ServiceExt};
 use tauri::{
     menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
@@ -560,6 +560,7 @@ pub fn run() {
                     pools,
                     emit,
                     source: "ui".into(),
+                    pool_access: PoolAccess::Human,
                     redactor_cache: Default::default(),
                     pending_permissions: Default::default(),
                     pending_migrations: Default::default(),
@@ -624,6 +625,10 @@ pub fn run_mcp() {
             // task that resolves incoming verdicts via the pending registries.
             emit: mcp_bridge(pending_permissions.clone(), pending_migrations.clone()),
             source: "mcp".into(),
+            // Phase 0: unchanged behavior. Phase 4 deletes this core entirely
+            // (the MCP process stops touching Postgres) and the UI grows an
+            // `Agent`-access core to dispatch proxied tool calls.
+            pool_access: PoolAccess::Human,
             redactor_cache: Default::default(),
             pending_permissions,
             pending_migrations,

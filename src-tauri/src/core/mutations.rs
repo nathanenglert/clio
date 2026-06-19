@@ -25,7 +25,7 @@ pub async fn apply_mutations(
         if batch.ops.is_empty() {
             return Err(anyhow!("empty mutation batch"));
         }
-        let pool = core.pools.ensure(&core.meta, conn).await?;
+        let pool = core.pool(conn).await?;
 
         // Cache column metadata per (schema, table) so we don't re-describe in a loop.
         let mut col_cache: std::collections::HashMap<(String, String), Vec<ColumnDescription>> =

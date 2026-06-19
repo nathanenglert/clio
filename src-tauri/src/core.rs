@@ -1,9 +1,9 @@
 use anyhow::Result;
-use sqlx::SqlitePool;
+use sqlx::{PgPool, SqlitePool};
 use std::time::Instant;
 
 use crate::activity::{record, record_with_payload, EmitFn};
-use crate::pool::PoolRegistry;
+use crate::pool::{PoolAccess, PoolRegistry};
 
 mod execute;
 mod export;
@@ -38,6 +38,11 @@ pub struct Core {
     pub pools: PoolRegistry,
     pub emit: EmitFn,
     pub source: String, // "ui" | "mcp"
+    /// Whether this core may open Postgres pools on demand (`Human`) or may
+    /// only use pools a human already opened (`Agent`). Read at exactly one
+    /// site — `Core::pool` — so every query/schema/execute path inherits the
+    /// right behavior without threading a flag through each call.
+    pub pool_access: PoolAccess,
     /// Lazy-built cache of `(table_oid, attnum) → Category` per connection.
     /// Invalidated by `update_classification` and connection drop.
     pub(crate) redactor_cache: RedactorCache,
@@ -51,6 +56,25 @@ pub struct Core {
 }
 
 impl Core {
+    /// The single seam every query/schema/execute path uses to acquire a
+    /// Postgres pool. A `Human` core may open the pool on demand; an `Agent`
+    /// core may only use a pool a human already opened, so an agent can never
+    /// reach a database the human hasn't connected in the workbench. Routing
+    /// *all* pool acquisition through here (rather than calling
+    /// `PoolRegistry::ensure` directly) keeps that guarantee from silently
+    /// regressing when a new call site is added.
+    pub(crate) async fn pool(&self, conn: &str) -> Result<PgPool> {
+        match self.pool_access {
+            PoolAccess::Human => self.pools.ensure(&self.meta, conn).await,
+            PoolAccess::Agent => self.pools.get_open(conn).await.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "not connected: a human must connect '{conn}' in the workbench \
+                     before an agent can use it"
+                )
+            }),
+        }
+    }
+
     /// Convenience: emit a synchronous ok/err event.
     pub(crate) fn record_ok<T>(
         &self,

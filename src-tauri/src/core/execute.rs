@@ -65,7 +65,7 @@ async fn run_with_gate(
 
     // 2. Open the pool early — needed for EXPLAIN below and for running
     //    whatever statement comes out the other side of the gate.
-    let pool = core.pools.ensure(&core.meta, conn).await?;
+    let pool = core.pool(conn).await?;
 
     // 3. Row estimate via EXPLAIN — only meaningful for data writes. DDL
     //    rejects EXPLAIN; reads don't trigger row-bounded rules; TRUNCATE
@@ -272,7 +272,7 @@ async fn run_migration_with_gate(
     };
 
     // Open the pool and (optionally) BEGIN a transaction.
-    let pool = core.pools.ensure(&core.meta, conn).await?;
+    let pool = core.pool(conn).await?;
     let mut tx_opt = if wrap_in_tx {
         Some(pool.begin().await.context("begin migration transaction")?)
     } else {

@@ -175,7 +175,7 @@ pub(super) async fn run_decoded(
     reveal: bool,
 ) -> Result<QueryResult> {
     let started = Instant::now();
-    let pool = core.pools.ensure(&core.meta, conn).await?;
+    let pool = core.pool(conn).await?;
 
     // Look up the redactor view *before* running the query so we can use
     // the per-column source info (relation_id / attribute_no) reported by

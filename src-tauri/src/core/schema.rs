@@ -12,7 +12,7 @@ use super::Core;
 pub async fn list_schemas(core: &Core, conn: &str) -> Result<Vec<String>> {
     let started = Instant::now();
     let r = async {
-        let pool = core.pools.ensure(&core.meta, conn).await?;
+        let pool = core.pool(conn).await?;
         let rows = sqlx::query(
             "SELECT schema_name FROM information_schema.schemata
              WHERE schema_name NOT IN ('information_schema','pg_catalog','pg_toast')
@@ -32,7 +32,7 @@ pub async fn list_schemas(core: &Core, conn: &str) -> Result<Vec<String>> {
 pub async fn list_tables(core: &Core, conn: &str, schema: &str) -> Result<Vec<TableSummary>> {
     let started = Instant::now();
     let r = async {
-        let pool = core.pools.ensure(&core.meta, conn).await?;
+        let pool = core.pool(conn).await?;
         // pg_class lets us pull relkind + reltuples in one shot; information_schema
         // would require a join + lose the relkind distinction (matviews aren't in
         // information_schema.tables at all).
@@ -83,7 +83,7 @@ pub async fn search_columns(
 ) -> Result<Vec<ColumnSearchHit>> {
     let started = Instant::now();
     let r = async {
-        let pool = core.pools.ensure(&core.meta, conn).await?;
+        let pool = core.pool(conn).await?;
         let pattern = format!("%{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         let rows = sqlx::query(
             r#"
@@ -129,7 +129,7 @@ pub async fn describe_table(
 ) -> Result<TableDescription> {
     let started = Instant::now();
     let r = async {
-        let pool = core.pools.ensure(&core.meta, conn).await?;
+        let pool = core.pool(conn).await?;
 
         // ── relkind first ─────────────────────────────────────────
         // We need it to decide whether to fetch a view definition and to
