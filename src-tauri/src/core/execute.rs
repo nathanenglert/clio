@@ -98,6 +98,7 @@ async fn run_with_gate(
             let request = PermissionRequest {
                 id: id.clone(),
                 source: core.source.clone(),
+                agent_id: core.agent_id.clone(),
                 sql: sql.to_string(),
                 intent: intent.map(String::from),
                 op_kind: op_kind_str(stmt.kind.op_kind()).into(),
@@ -160,7 +161,8 @@ fn emit_permission_required(core: &Core, req: &PermissionRequest) {
         "pending",
         /* duration_ms */ 0,
     )
-    .with_payload(payload);
+    .with_payload(payload)
+    .with_agent(core.agent_id.clone());
     (core.emit)(evt);
 }
 
@@ -247,6 +249,7 @@ async fn run_migration_with_gate(
     let request = MigrationRequest {
         id: id.clone(),
         source: core.source.clone(),
+        agent_id: core.agent_id.clone(),
         intent: intent.map(String::from),
         statements: classified.clone(),
     };
@@ -292,6 +295,7 @@ async fn run_migration_with_gate(
             let req = PermissionRequest {
                 id: rid.clone(),
                 source: core.source.clone(),
+                agent_id: core.agent_id.clone(),
                 sql: original_sql.clone(),
                 intent: intent.map(String::from),
                 op_kind: stmt_verdict.op_kind.clone(),
@@ -365,7 +369,8 @@ fn emit_migration_required(core: &Core, req: &MigrationRequest) {
         "pending",
         0,
     )
-    .with_payload(payload);
+    .with_payload(payload)
+    .with_agent(core.agent_id.clone());
     (core.emit)(evt);
 }
 

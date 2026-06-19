@@ -1,4 +1,5 @@
 mod activity;
+mod bridge;
 mod connections;
 mod core;
 mod mcp;
@@ -7,9 +8,10 @@ mod types;
 
 use std::time::Duration;
 
-use activity::{mcp_bridge, send_verdict_to_mcp, spawn_socket_listener, tauri_emitter, McpWriter};
+use activity::tauri_emitter;
+use bridge::{AgentRegistry, ProxyClient};
 use core::Core;
-use pool::{PoolAccess, PoolRegistry};
+use pool::PoolRegistry;
 use rmcp::{transport::stdio, ServiceExt};
 use tauri::{
     menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
@@ -179,31 +181,31 @@ async fn update_classification(
 ///   `{ "kind": "deny" }`
 ///   `{ "kind": "modified", "sql": "..." }`
 ///
-/// Writes the verdict over the bidirectional bridge to whichever MCP
-/// process is currently connected. The MCP-side reader resolves the
-/// oneshot in its `PendingPermissions`. Errors if no MCP is connected or
-/// if the socket write fails.
+/// The agent's `execute_statement` now runs inside this (UI) process and parks
+/// on a oneshot in the shared `PendingPermissions`. Resolving in-process here
+/// unblocks it directly — no socket round-trip. The human core shares the same
+/// registry as the agent core (see `Core::ui_with_agent`), so the id matches.
 #[tauri::command]
 async fn resolve_permission(
-    writer: State<'_, McpWriter>,
+    state: State<'_, Core>,
     id: String,
     verdict: core::permission::PermissionVerdict,
 ) -> Result<(), String> {
-    send_verdict_to_mcp(&writer, &id, verdict).await
+    state.pending_permissions.resolve(&id, verdict).await
 }
 
-/// Frontend → backend channel for resolving a pending bulk-migration
-/// request (Phase 4). `verdict` is one of:
+/// Frontend → backend channel for resolving a pending bulk-migration request.
+/// `verdict` is one of:
 ///   `{ "kind": "approve_and_prompt", "wrap_in_transaction": true }`
 ///   `{ "kind": "reject" }`
-/// Writes the verdict over the same bidirectional bridge to the MCP.
+/// Resolved in-process, like `resolve_permission`.
 #[tauri::command]
 async fn resolve_migration(
-    writer: State<'_, McpWriter>,
+    state: State<'_, Core>,
     id: String,
     verdict: core::permission::MigrationVerdict,
 ) -> Result<(), String> {
-    activity::send_migration_verdict_to_mcp(&writer, &id, verdict).await
+    state.pending_migrations.resolve(&id, verdict).await
 }
 
 /// Returns the active policy ruleset surfaced by `execute_statement` and
@@ -547,32 +549,22 @@ pub fn run() {
             // the OS level — see build_app_menu for the why.
             let menu = build_app_menu(&handle)?;
             app.set_menu(menu)?;
-            // Build Core synchronously on the async runtime, then manage it
-            // before invoke_handler can run any commands.
-            let core = tauri::async_runtime::block_on(async {
+            // Build the human + agent sibling cores synchronously on the async
+            // runtime, then manage the human core before invoke_handler can run
+            // any commands. The agent core is handed to the bridge listener.
+            let (human_core, agent_core) = tauri::async_runtime::block_on(async {
                 let meta = connections::open_metadata()
                     .await
                     .expect("metadata db open");
                 let pools = PoolRegistry::default();
                 let emit = tauri_emitter(handle.clone());
-                Core {
-                    meta,
-                    pools,
-                    emit,
-                    source: "ui".into(),
-                    pool_access: PoolAccess::Human,
-                    redactor_cache: Default::default(),
-                    pending_permissions: Default::default(),
-                    pending_migrations: Default::default(),
-                }
+                Core::ui_with_agent(meta, pools, emit)
             });
-            handle.manage(core);
-            // Shared handle for verdict writes back to the MCP subprocess.
-            // The listener fills this in on every accept; resolve_permission
-            // reads from it to forward verdicts.
-            let mcp_writer: McpWriter = Default::default();
-            handle.manage(mcp_writer.clone());
-            spawn_socket_listener(handle.clone(), mcp_writer);
+            handle.manage(human_core);
+            // Accept agent connections over the authenticated Unix socket and
+            // dispatch their tool calls against the (pool-less) agent core.
+            let registry = AgentRegistry::default();
+            bridge::spawn_listener(handle.clone(), agent_core, registry);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -615,25 +607,14 @@ pub fn run_mcp() {
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async move {
-        let meta = connections::open_metadata().await.expect("metadata db");
-        let pending_permissions = core::permission::PendingPermissions::default();
-        let pending_migrations = core::permission::PendingMigrations::default();
-        let core = Core {
-            meta,
-            pools: PoolRegistry::default(),
-            // Bridge connects lazily on first event and spawns a reader
-            // task that resolves incoming verdicts via the pending registries.
-            emit: mcp_bridge(pending_permissions.clone(), pending_migrations.clone()),
-            source: "mcp".into(),
-            // Phase 0: unchanged behavior. Phase 4 deletes this core entirely
-            // (the MCP process stops touching Postgres) and the UI grows an
-            // `Agent`-access core to dispatch proxied tool calls.
-            pool_access: PoolAccess::Human,
-            redactor_cache: Default::default(),
-            pending_permissions,
-            pending_migrations,
-        };
-        let server = mcp::McpServer::new(core);
+        // This process owns NO PoolRegistry and NO credentials — it can't open
+        // a Postgres connection at all. Every DB-touching tool forwards over
+        // the Unix socket to the UI, which runs it only against a pool a human
+        // already opened. If the UI isn't running, the proxy call fails (and
+        // retries on the next call), so an agent can do nothing until a human
+        // launches the workbench and connects.
+        let label = std::env::var("DBAPP_AGENT_LABEL").unwrap_or_else(|_| "Agent".to_string());
+        let server = mcp::McpServer::new(ProxyClient::new(label));
         let service = match server.serve(stdio()).await {
             Ok(s) => s,
             Err(e) => {

@@ -23,6 +23,9 @@ use super::policy::Target;
 pub struct PermissionRequest {
     pub id: String,
     pub source: String,
+    /// Which agent raised this request (proxied-MCP path). `None` for UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub sql: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<String>,
@@ -67,6 +70,9 @@ pub enum PermissionVerdict {
 pub struct MigrationRequest {
     pub id: String,
     pub source: String,
+    /// Which agent raised this request (proxied-MCP path). `None` for UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<String>,
     pub statements: Vec<MigrationStatement>,

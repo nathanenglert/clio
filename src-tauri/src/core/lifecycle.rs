@@ -56,6 +56,19 @@ pub async fn connect(core: &Core, name: &str) -> Result<Option<ClassifyOutcome>>
     r
 }
 
+/// Surface an agent's proposed query to the human as a new (un-run) tab.
+/// Fire-and-forget: records a `propose_query` activity event whose payload the
+/// frontend turns into an agent-authored tab + toast. Never touches Postgres.
+/// Returns the resolved tab title.
+pub fn propose_query(core: &Core, sql: &str, title: Option<String>) -> String {
+    let started = Instant::now();
+    let detail = title.unwrap_or_else(|| "Proposed query".to_string());
+    let payload = Some(super::query::cap_payload(sql));
+    let result: Result<()> = Ok(());
+    core.record_ok_with_payload("propose_query", detail.clone(), payload, started, &result);
+    detail
+}
+
 pub async fn disconnect(core: &Core, name: &str) -> Result<()> {
     let started = Instant::now();
     core.pools.drop_pool(name).await;

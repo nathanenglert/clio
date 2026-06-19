@@ -285,6 +285,11 @@ pub struct ActivityEvent {
     pub id: String,
     pub ts_ms: u64,
     pub source: String, // "ui" | "mcp"
+    /// Which agent produced this event, when `source == "mcp"`. `None` for
+    /// UI-originated events. Lets the activity surfaces attribute and group by
+    /// agent once more than one is connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub tool: String,
     pub detail: String,
     pub status: String, // "ok" | "error"
@@ -304,6 +309,7 @@ impl ActivityEvent {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
             source: source.into(),
+            agent_id: None,
             tool: tool.into(),
             detail: detail.into(),
             status: status.into(),
@@ -314,6 +320,11 @@ impl ActivityEvent {
 
     pub fn with_payload(mut self, payload: Option<String>) -> Self {
         self.payload = payload;
+        self
+    }
+
+    pub fn with_agent(mut self, agent_id: Option<String>) -> Self {
+        self.agent_id = agent_id;
         self
     }
 }
