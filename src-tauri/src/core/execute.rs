@@ -94,7 +94,7 @@ async fn run_with_gate(
             return Err(anyhow!("blocked by policy '{rule}': {reason}"));
         }
         Verdict::Prompt { rule, reason } => {
-            let (id, rx) = core.pending_permissions.register().await;
+            let (id, rx) = core.pending_permissions.register(core.agent_id.clone()).await;
             let request = PermissionRequest {
                 id: id.clone(),
                 source: core.source.clone(),
@@ -121,7 +121,15 @@ async fn run_with_gate(
                         request.rule_label
                     ));
                 }
-                PermissionVerdict::Modified { sql: new_sql } => new_sql,
+                PermissionVerdict::Modified { sql: new_sql } => {
+                    // The human may have rewritten the statement entirely — a
+                    // benign Prompt card edited into a DROP, say. Re-evaluate
+                    // the edit against the same policy before it runs; a Block
+                    // verdict here is the human editing past a hard gate, and
+                    // must be refused. See `regate_modified`.
+                    regate_modified(&rules, &new_sql)?;
+                    new_sql
+                }
             }
         }
     };
@@ -147,6 +155,34 @@ async fn estimate_rows(pool: &sqlx::PgPool, sql: &str) -> Option<u64> {
         .map(|n| n.round().max(0.0) as u64)
 }
 
+/// Re-evaluate human-edited SQL before it runs. When a user approves a Prompt
+/// card with a modification, the new SQL must clear the same policy a fresh
+/// statement would — otherwise the gate is trivially bypassed by editing an
+/// allowed-looking statement into a destructive one. A `Block` verdict is
+/// refused; `Allow`/`Prompt` are the human's explicit, in-policy choice and
+/// run. Multi-statement or unparseable edits are rejected outright so a single
+/// approval can't smuggle extra statements.
+///
+/// No row estimate is supplied: no `Block` rule depends on one (they relax the
+/// row-bounded `Allow` rules, never escalate to `Block`), and re-running
+/// `EXPLAIN` here would add a round-trip for no security gain.
+fn regate_modified(rules: &[policy::Rule], new_sql: &str) -> Result<()> {
+    let stmts = policy::parse_sql(new_sql)
+        .map_err(|e| anyhow!("modified SQL did not parse: {e}"))?;
+    if stmts.len() != 1 {
+        return Err(anyhow!(
+            "modified SQL must be exactly one statement; got {}",
+            stmts.len()
+        ));
+    }
+    match policy::evaluate(rules, &stmts[0], None) {
+        Verdict::Block { rule, reason } => Err(anyhow!(
+            "modified SQL blocked by policy '{rule}': {reason}"
+        )),
+        Verdict::Allow { .. } | Verdict::Prompt { .. } => Ok(()),
+    }
+}
+
 fn emit_permission_required(core: &Core, req: &PermissionRequest) {
     let detail = if req.reason.is_empty() {
         "permission required".to_string()
@@ -168,15 +204,20 @@ fn emit_permission_required(core: &Core, req: &PermissionRequest) {
 
 /// Bulk-migration runner. Parses every statement, classifies each against
 /// the policy, surfaces the full plan to the UI via `migration_required`,
-/// and waits for a bulk verdict. On `ApproveAndPrompt`, runs the plan
-/// statement-by-statement: in-policy statements run immediately, deviations
-/// fall through to the standard single-statement permission card. Wrapping
-/// in a transaction (default true on the verdict) makes any denial roll
-/// back the whole batch.
+/// and waits for a bulk verdict. On `ApproveAndPrompt`, it resolves every
+/// deviation to a final statement *first* — each via the standard
+/// single-statement permission card — and only then runs the fully-approved
+/// plan. Collecting all verdicts before touching the database means a denial
+/// (or a rejected edit) aborts before any statement has run, so the batch is
+/// never left half-applied, and no transaction or lock is ever held open
+/// while a human deliberates.
+///
+/// `wrap_in_transaction` additionally wraps the run in BEGIN/COMMIT so a
+/// *runtime* error rolls back the statements that did run.
 ///
 /// Returns a vector of QueryResult — one per statement that ran. If a
-/// deviation is denied (or any statement errors), returns Err and the
-/// transaction is rolled back.
+/// deviation is denied or its edit fails re-gating, returns Err and nothing
+/// has run.
 pub async fn execute_migration(
     core: &Core,
     conn: &str,
@@ -245,7 +286,7 @@ async fn run_migration_with_gate(
     let any_blocked = classified.iter().any(|s| s.verdict == "block");
 
     // Register the bulk verdict slot, emit the plan, await.
-    let (id, rx) = core.pending_migrations.register().await;
+    let (id, rx) = core.pending_migrations.register(core.agent_id.clone()).await;
     let request = MigrationRequest {
         id: id.clone(),
         source: core.source.clone(),
@@ -274,15 +315,18 @@ async fn run_migration_with_gate(
         }
     };
 
-    // Open the pool and (optionally) BEGIN a transaction.
+    // Acquire the pool up front (just an Arc clone — holds no locks) so we
+    // fail fast if the connection is gone. The transaction is NOT opened yet:
+    // we resolve every verdict first.
     let pool = core.pool(conn).await?;
-    let mut tx_opt = if wrap_in_tx {
-        Some(pool.begin().await.context("begin migration transaction")?)
-    } else {
-        None
-    };
 
-    let mut results: Vec<QueryResult> = Vec::with_capacity(statements.len());
+    // ── Phase A: resolve every statement to its final SQL, before any DB
+    // work. A deviation pauses for the standard single-statement card. A Deny
+    // — or a Modified edit that fails re-gating — aborts here, when nothing
+    // has run and no transaction is open. This is what keeps a denied batch
+    // from being left half-applied and a transaction from being held open
+    // across a human prompt.
+    let mut final_sqls: Vec<String> = Vec::with_capacity(statements.len());
     for (idx, stmt) in parsed.iter().enumerate() {
         let original_sql = &statements[idx];
         let stmt_verdict = &classified[idx];
@@ -290,8 +334,7 @@ async fn run_migration_with_gate(
         let final_sql: String = if stmt_verdict.verdict == "allow" {
             original_sql.clone()
         } else {
-            // Prompt fallthrough — emit single-statement card and wait.
-            let (rid, rx) = core.pending_permissions.register().await;
+            let (rid, rx) = core.pending_permissions.register(core.agent_id.clone()).await;
             let req = PermissionRequest {
                 id: rid.clone(),
                 source: core.source.clone(),
@@ -313,30 +356,42 @@ async fn run_migration_with_gate(
             match v {
                 PermissionVerdict::Allow => original_sql.clone(),
                 PermissionVerdict::Deny => {
-                    if let Some(tx) = tx_opt.take() {
-                        let _ = tx.rollback().await;
-                    }
-                    return Err(anyhow!(
-                        "migration aborted: stmt {idx} denied by user"
-                    ));
+                    return Err(anyhow!("migration aborted: stmt {idx} denied by user"));
                 }
-                PermissionVerdict::Modified { sql: new_sql } => new_sql,
+                PermissionVerdict::Modified { sql: new_sql } => {
+                    // Same re-gate as the single-statement path: a human edit
+                    // must clear the policy before it joins the plan.
+                    regate_modified(&rules, &new_sql)?;
+                    new_sql
+                }
             }
         };
+        final_sqls.push(final_sql);
+    }
 
-        // Run the statement. Inside a transaction we go straight through
-        // sqlx — no redaction lookup, no pool round-trip — since redaction
-        // applies to query *output*, and migrations rarely return rows.
+    // ── Phase B: the plan is fully approved — now run it. Only here do we
+    // (optionally) BEGIN, so locks live only for the duration of execution.
+    let mut tx_opt = if wrap_in_tx {
+        Some(pool.begin().await.context("begin migration transaction")?)
+    } else {
+        None
+    };
+
+    let mut results: Vec<QueryResult> = Vec::with_capacity(final_sqls.len());
+    for (idx, final_sql) in final_sqls.iter().enumerate() {
+        // Inside a transaction we go straight through sqlx — no redaction
+        // lookup, no pool round-trip — since redaction applies to query
+        // *output*, and migrations rarely return rows.
         let exec_started = Instant::now();
         match tx_opt.as_mut() {
             Some(tx) => {
-                sqlx::query(&final_sql)
+                sqlx::query(final_sql)
                     .execute(&mut **tx)
                     .await
                     .with_context(|| format!("stmt {idx} failed"))?;
             }
             None => {
-                sqlx::query(&final_sql)
+                sqlx::query(final_sql)
                     .execute(&pool)
                     .await
                     .with_context(|| format!("stmt {idx} failed"))?;
@@ -401,5 +456,376 @@ fn stmt_kind_str(k: StmtKind) -> &'static str {
         StmtKind::AlterTable => "alter_table",
         StmtKind::AlterOther => "alter_other",
         StmtKind::Other => "other",
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Integration tests for the gated runner.
+//
+// These drive `execute_statement` / `execute_migration` end-to-end against a
+// real Postgres — the in-repo dev database (see `dev/db.sh`). Each test runs
+// in a throwaway schema and skips (does not fail) when the DB is unreachable,
+// so `cargo test` stays green on a box without it.
+//
+//   TEST_DATABASE_URL  overrides the target (default: the dev DB on :5433).
+//   Start the DB with `dev/db.sh up`.
+// ─────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::activity::EmitFn;
+    use crate::connections;
+    use crate::core::permission::{MigrationVerdict, PermissionVerdict};
+    use crate::core::policy;
+    use crate::core::Core;
+    use crate::pool::PoolRegistry;
+    use crate::types::{ActivityEvent, NewConnectionInput};
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::PgPool;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+
+    const TEST_CONN: &str = "testdb";
+
+    fn test_db_url() -> String {
+        std::env::var("TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://workbench:workbench@localhost:5433/workbench".into())
+    }
+
+    /// A `Core` wired to the live test DB, plus the captured activity stream
+    /// and a private throwaway schema for the test to mutate.
+    struct Harness {
+        core: Core,
+        events: UnboundedReceiver<ActivityEvent>,
+        pool: PgPool,
+        schema: String,
+    }
+
+    /// Build a [`Harness`], or return `None` (and print a skip notice) when the
+    /// test DB is unreachable. The Postgres pool is injected directly into the
+    /// registry, so no secret-store or real connection record is needed; the
+    /// in-memory metadata DB just carries the `testdb` row `run_decoded` reads.
+    async fn setup() -> Option<Harness> {
+        let pool = match PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(3))
+            .connect(&test_db_url())
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "SKIP integration test: DB unreachable at {} ({e}). \
+                     Start it with `dev/db.sh up` or set TEST_DATABASE_URL.",
+                    test_db_url()
+                );
+                return None;
+            }
+        };
+
+        let meta = connections::open_metadata_in_memory().await.unwrap();
+        connections::insert(
+            &meta,
+            &NewConnectionInput {
+                name: TEST_CONN.into(),
+                host: "localhost".into(),
+                port: 0,
+                database: "workbench".into(),
+                username: "workbench".into(),
+                password: String::new(), // empty ⇒ never touches the secret store
+                ssl_mode: "disable".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let pools = PoolRegistry::default();
+        pools.insert_for_test(TEST_CONN, pool.clone()).await;
+
+        let (tx, rx) = unbounded_channel();
+        let emit: EmitFn = Arc::new(move |e| {
+            let _ = tx.send(e);
+        });
+
+        // The agent core mirrors the production caller of the gated runner.
+        let (_human, agent) = Core::ui_with_agent(meta, pools, emit);
+
+        let schema = format!("it_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        Some(Harness {
+            core: agent,
+            events: rx,
+            pool,
+            schema,
+        })
+    }
+
+    impl Harness {
+        async fn drop_schema(&self) {
+            let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema))
+                .execute(&self.pool)
+                .await;
+        }
+
+        /// Await the next activity event whose `tool` matches, and return the
+        /// `id` from its JSON payload (a `PermissionRequest`/`MigrationRequest`).
+        async fn next_request_id(&mut self, tool: &str) -> String {
+            loop {
+                let evt = tokio::time::timeout(Duration::from_secs(5), self.events.recv())
+                    .await
+                    .expect("timed out waiting for an activity event")
+                    .expect("activity channel closed");
+                if evt.tool == tool {
+                    let payload = evt.payload.expect("permission event carries a payload");
+                    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                    return v["id"].as_str().unwrap().to_string();
+                }
+            }
+        }
+
+        async fn table_exists(&self, table: &str) -> bool {
+            sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+                .bind(format!("{}.{}", self.schema, table))
+                .fetch_one(&self.pool)
+                .await
+                .unwrap()
+        }
+
+        /// Approve the next bulk migration card.
+        async fn approve_migration(&mut self, wrap_in_transaction: bool) {
+            let id = self.next_request_id("migration_required").await;
+            self.core
+                .pending_migrations
+                .resolve(&id, MigrationVerdict::ApproveAndPrompt { wrap_in_transaction })
+                .await
+                .unwrap();
+        }
+
+        /// Resolve the next single-statement permission card.
+        async fn resolve_next_permission(&mut self, verdict: PermissionVerdict) {
+            let id = self.next_request_id("permission_required").await;
+            self.core.pending_permissions.resolve(&id, verdict).await.unwrap();
+        }
+    }
+
+    /// Smoke test: the harness can drive `execute_statement` end-to-end through
+    /// the Allow branch against the live DB and get rows back. Proves the wiring
+    /// (injected pool + in-memory meta + redactor short-circuit) before the
+    /// behavioral fixes build on it.
+    #[tokio::test]
+    async fn allow_read_runs_against_test_db() {
+        let Some(h) = setup().await else { return };
+        let r = execute_statement(&h.core, TEST_CONN, "SELECT 1 AS one", None).await;
+        h.drop_schema().await;
+        let res = r.expect("an allowed SELECT should run");
+        assert_eq!(res.row_count, 1, "SELECT 1 returns one row");
+    }
+
+    // ── Phase 2: re-gate human-edited (Modified) SQL ─────────────────────
+
+    /// Pure check on the re-gate decision: Block-class edits are refused;
+    /// in-policy edits pass; multi-statement / unparseable edits are rejected.
+    #[test]
+    fn regate_modified_refuses_block_and_multi_statement() {
+        let rules = policy::default_rules();
+        assert!(regate_modified(&rules, "DROP TABLE foo").is_err(), "DROP TABLE is Block");
+        assert!(regate_modified(&rules, "DROP SCHEMA bar").is_err(), "DROP SCHEMA is Block");
+        assert!(regate_modified(&rules, "SELECT 1").is_ok(), "reads are fine");
+        assert!(
+            regate_modified(&rules, "CREATE TABLE foo (id int)").is_ok(),
+            "a Prompt-class edit is the human's explicit choice and runs"
+        );
+        assert!(
+            regate_modified(&rules, "SELECT 1; SELECT 2").is_err(),
+            "an edit can't smuggle multiple statements"
+        );
+        assert!(regate_modified(&rules, "NOT SQL AT ALL").is_err(), "unparseable is refused");
+    }
+
+    /// The hole this closes: a human approves a benign-looking Prompt card but
+    /// rewrites it into a `DROP TABLE`. The edit must be re-gated and refused,
+    /// and neither the original nor the edited statement may run.
+    #[tokio::test]
+    async fn modified_into_drop_is_refused_and_nothing_runs() {
+        let Some(mut h) = setup().await else { return };
+        sqlx::query(&format!("CREATE TABLE {}.victim (id int)", h.schema))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+
+        let core = h.core.clone();
+        let create = format!("CREATE TABLE {}.t (id int)", h.schema); // Prompt-class
+        let handle = tokio::spawn(async move {
+            execute_statement(&core, TEST_CONN, &create, None).await
+        });
+
+        let id = h.next_request_id("permission_required").await;
+        let drop_sql = format!("DROP TABLE {}.victim", h.schema);
+        h.core
+            .pending_permissions
+            .resolve(&id, PermissionVerdict::Modified { sql: drop_sql })
+            .await
+            .unwrap();
+
+        let r = handle.await.unwrap();
+        let victim = h.table_exists("victim").await;
+        let t = h.table_exists("t").await;
+        h.drop_schema().await;
+
+        let err = r.expect_err("a modified-into-DROP edit must be refused");
+        assert!(err.to_string().contains("blocked"), "expected a block error, got: {err}");
+        assert!(victim, "the edited DROP must not have run");
+        assert!(!t, "the original CREATE must not have run either");
+    }
+
+    /// The re-gate must not over-block: an edit that stays within policy still
+    /// runs (the human's explicit choice), and the original is discarded.
+    #[tokio::test]
+    async fn modified_within_policy_runs() {
+        let Some(mut h) = setup().await else { return };
+
+        let core = h.core.clone();
+        let original = format!("CREATE TABLE {}.orig (id int)", h.schema);
+        let handle = tokio::spawn(async move {
+            execute_statement(&core, TEST_CONN, &original, None).await
+        });
+
+        let id = h.next_request_id("permission_required").await;
+        let edited = format!("CREATE TABLE {}.edited (id int)", h.schema);
+        h.core
+            .pending_permissions
+            .resolve(&id, PermissionVerdict::Modified { sql: edited })
+            .await
+            .unwrap();
+
+        let r = handle.await.unwrap();
+        let edited_exists = h.table_exists("edited").await;
+        let orig_exists = h.table_exists("orig").await;
+        h.drop_schema().await;
+
+        r.expect("an in-policy modified statement should run");
+        assert!(edited_exists, "the edited statement should have run");
+        assert!(!orig_exists, "the original statement should not have run");
+    }
+
+    // ── Phase 3+4: collect verdicts before BEGIN ─────────────────────────
+
+    /// The half-apply / lock-held holes: in a non-transactional batch a
+    /// mid-batch Deny used to leave earlier statements committed, because each
+    /// statement ran as soon as its card was answered. Now every verdict is
+    /// collected before any statement runs — so the moment stmt b's card
+    /// appears, stmt a (already Allowed) still has not run, and denying b
+    /// aborts the whole batch with nothing applied.
+    #[tokio::test]
+    async fn migration_deny_aborts_before_any_statement_runs() {
+        let Some(mut h) = setup().await else { return };
+        let core = h.core.clone();
+        let s = h.schema.clone();
+        let stmts = vec![
+            format!("CREATE TABLE {s}.a (id int)"),
+            format!("CREATE TABLE {s}.b (id int)"),
+        ];
+        let handle =
+            tokio::spawn(async move { execute_migration(&core, TEST_CONN, stmts, None).await });
+
+        // Approve WITHOUT a transaction — the mode that used to half-apply.
+        h.approve_migration(false).await;
+
+        // Allow stmt a's card.
+        let card_a = h.next_request_id("permission_required").await;
+        h.core
+            .pending_permissions
+            .resolve(&card_a, PermissionVerdict::Allow)
+            .await
+            .unwrap();
+
+        // stmt b's card now appears — proving the runner is still collecting
+        // verdicts and has not begun executing. Pre-fix, a would already exist.
+        let card_b = h.next_request_id("permission_required").await;
+        assert!(
+            !h.table_exists("a").await,
+            "no statement may run until every verdict is collected"
+        );
+
+        h.core
+            .pending_permissions
+            .resolve(&card_b, PermissionVerdict::Deny)
+            .await
+            .unwrap();
+
+        let r = handle.await.unwrap();
+        let a = h.table_exists("a").await;
+        let b = h.table_exists("b").await;
+        h.drop_schema().await;
+
+        r.expect_err("a denied deviation must abort the migration");
+        assert!(!a, "stmt a must not be left committed after the deny");
+        assert!(!b, "stmt b was denied");
+    }
+
+    /// Happy path: every deviation approved, transaction-wrapped — the batch
+    /// commits and all statements are present.
+    #[tokio::test]
+    async fn migration_all_approved_commits_atomically() {
+        let Some(mut h) = setup().await else { return };
+        let core = h.core.clone();
+        let s = h.schema.clone();
+        let stmts = vec![
+            format!("CREATE TABLE {s}.a (id int)"),
+            format!("CREATE TABLE {s}.b (id int)"),
+        ];
+        let handle =
+            tokio::spawn(async move { execute_migration(&core, TEST_CONN, stmts, None).await });
+
+        h.approve_migration(true).await;
+        h.resolve_next_permission(PermissionVerdict::Allow).await;
+        h.resolve_next_permission(PermissionVerdict::Allow).await;
+
+        let r = handle.await.unwrap();
+        let a = h.table_exists("a").await;
+        let b = h.table_exists("b").await;
+        h.drop_schema().await;
+
+        let results = r.expect("an all-approved migration should commit");
+        assert_eq!(results.len(), 2, "one result per statement");
+        assert!(a && b, "both statements committed");
+    }
+
+    /// The migration path re-gates Modified deviations too: editing a card
+    /// into a DROP is refused, and nothing runs.
+    #[tokio::test]
+    async fn migration_modified_into_drop_is_refused() {
+        let Some(mut h) = setup().await else { return };
+        sqlx::query(&format!("CREATE TABLE {}.victim (id int)", h.schema))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+
+        let core = h.core.clone();
+        let s = h.schema.clone();
+        let stmts = vec![format!("CREATE TABLE {s}.t (id int)")];
+        let handle =
+            tokio::spawn(async move { execute_migration(&core, TEST_CONN, stmts, None).await });
+
+        h.approve_migration(false).await;
+        let card = h.next_request_id("permission_required").await;
+        h.core
+            .pending_permissions
+            .resolve(&card, PermissionVerdict::Modified { sql: format!("DROP TABLE {s}.victim") })
+            .await
+            .unwrap();
+
+        let r = handle.await.unwrap();
+        let victim = h.table_exists("victim").await;
+        h.drop_schema().await;
+
+        let err = r.expect_err("a modified-into-DROP deviation must be refused");
+        assert!(err.to_string().contains("blocked"), "expected a block error, got: {err}");
+        assert!(victim, "the edited DROP must not have run");
     }
 }
