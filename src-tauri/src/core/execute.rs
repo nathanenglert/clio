@@ -204,15 +204,20 @@ fn emit_permission_required(core: &Core, req: &PermissionRequest) {
 
 /// Bulk-migration runner. Parses every statement, classifies each against
 /// the policy, surfaces the full plan to the UI via `migration_required`,
-/// and waits for a bulk verdict. On `ApproveAndPrompt`, runs the plan
-/// statement-by-statement: in-policy statements run immediately, deviations
-/// fall through to the standard single-statement permission card. Wrapping
-/// in a transaction (default true on the verdict) makes any denial roll
-/// back the whole batch.
+/// and waits for a bulk verdict. On `ApproveAndPrompt`, it resolves every
+/// deviation to a final statement *first* — each via the standard
+/// single-statement permission card — and only then runs the fully-approved
+/// plan. Collecting all verdicts before touching the database means a denial
+/// (or a rejected edit) aborts before any statement has run, so the batch is
+/// never left half-applied, and no transaction or lock is ever held open
+/// while a human deliberates.
+///
+/// `wrap_in_transaction` additionally wraps the run in BEGIN/COMMIT so a
+/// *runtime* error rolls back the statements that did run.
 ///
 /// Returns a vector of QueryResult — one per statement that ran. If a
-/// deviation is denied (or any statement errors), returns Err and the
-/// transaction is rolled back.
+/// deviation is denied or its edit fails re-gating, returns Err and nothing
+/// has run.
 pub async fn execute_migration(
     core: &Core,
     conn: &str,
@@ -310,15 +315,18 @@ async fn run_migration_with_gate(
         }
     };
 
-    // Open the pool and (optionally) BEGIN a transaction.
+    // Acquire the pool up front (just an Arc clone — holds no locks) so we
+    // fail fast if the connection is gone. The transaction is NOT opened yet:
+    // we resolve every verdict first.
     let pool = core.pool(conn).await?;
-    let mut tx_opt = if wrap_in_tx {
-        Some(pool.begin().await.context("begin migration transaction")?)
-    } else {
-        None
-    };
 
-    let mut results: Vec<QueryResult> = Vec::with_capacity(statements.len());
+    // ── Phase A: resolve every statement to its final SQL, before any DB
+    // work. A deviation pauses for the standard single-statement card. A Deny
+    // — or a Modified edit that fails re-gating — aborts here, when nothing
+    // has run and no transaction is open. This is what keeps a denied batch
+    // from being left half-applied and a transaction from being held open
+    // across a human prompt.
+    let mut final_sqls: Vec<String> = Vec::with_capacity(statements.len());
     for (idx, stmt) in parsed.iter().enumerate() {
         let original_sql = &statements[idx];
         let stmt_verdict = &classified[idx];
@@ -326,7 +334,6 @@ async fn run_migration_with_gate(
         let final_sql: String = if stmt_verdict.verdict == "allow" {
             original_sql.clone()
         } else {
-            // Prompt fallthrough — emit single-statement card and wait.
             let (rid, rx) = core.pending_permissions.register().await;
             let req = PermissionRequest {
                 id: rid.clone(),
@@ -349,30 +356,42 @@ async fn run_migration_with_gate(
             match v {
                 PermissionVerdict::Allow => original_sql.clone(),
                 PermissionVerdict::Deny => {
-                    if let Some(tx) = tx_opt.take() {
-                        let _ = tx.rollback().await;
-                    }
-                    return Err(anyhow!(
-                        "migration aborted: stmt {idx} denied by user"
-                    ));
+                    return Err(anyhow!("migration aborted: stmt {idx} denied by user"));
                 }
-                PermissionVerdict::Modified { sql: new_sql } => new_sql,
+                PermissionVerdict::Modified { sql: new_sql } => {
+                    // Same re-gate as the single-statement path: a human edit
+                    // must clear the policy before it joins the plan.
+                    regate_modified(&rules, &new_sql)?;
+                    new_sql
+                }
             }
         };
+        final_sqls.push(final_sql);
+    }
 
-        // Run the statement. Inside a transaction we go straight through
-        // sqlx — no redaction lookup, no pool round-trip — since redaction
-        // applies to query *output*, and migrations rarely return rows.
+    // ── Phase B: the plan is fully approved — now run it. Only here do we
+    // (optionally) BEGIN, so locks live only for the duration of execution.
+    let mut tx_opt = if wrap_in_tx {
+        Some(pool.begin().await.context("begin migration transaction")?)
+    } else {
+        None
+    };
+
+    let mut results: Vec<QueryResult> = Vec::with_capacity(final_sqls.len());
+    for (idx, final_sql) in final_sqls.iter().enumerate() {
+        // Inside a transaction we go straight through sqlx — no redaction
+        // lookup, no pool round-trip — since redaction applies to query
+        // *output*, and migrations rarely return rows.
         let exec_started = Instant::now();
         match tx_opt.as_mut() {
             Some(tx) => {
-                sqlx::query(&final_sql)
+                sqlx::query(final_sql)
                     .execute(&mut **tx)
                     .await
                     .with_context(|| format!("stmt {idx} failed"))?;
             }
             None => {
-                sqlx::query(&final_sql)
+                sqlx::query(final_sql)
                     .execute(&pool)
                     .await
                     .with_context(|| format!("stmt {idx} failed"))?;
@@ -456,7 +475,7 @@ mod tests {
     use super::*;
     use crate::activity::EmitFn;
     use crate::connections;
-    use crate::core::permission::PermissionVerdict;
+    use crate::core::permission::{MigrationVerdict, PermissionVerdict};
     use crate::core::policy;
     use crate::core::Core;
     use crate::pool::PoolRegistry;
@@ -576,6 +595,22 @@ mod tests {
                 .await
                 .unwrap()
         }
+
+        /// Approve the next bulk migration card.
+        async fn approve_migration(&mut self, wrap_in_transaction: bool) {
+            let id = self.next_request_id("migration_required").await;
+            self.core
+                .pending_migrations
+                .resolve(&id, MigrationVerdict::ApproveAndPrompt { wrap_in_transaction })
+                .await
+                .unwrap();
+        }
+
+        /// Resolve the next single-statement permission card.
+        async fn resolve_next_permission(&mut self, verdict: PermissionVerdict) {
+            let id = self.next_request_id("permission_required").await;
+            self.core.pending_permissions.resolve(&id, verdict).await.unwrap();
+        }
     }
 
     /// Smoke test: the harness can drive `execute_statement` end-to-end through
@@ -676,5 +711,121 @@ mod tests {
         r.expect("an in-policy modified statement should run");
         assert!(edited_exists, "the edited statement should have run");
         assert!(!orig_exists, "the original statement should not have run");
+    }
+
+    // ── Phase 3+4: collect verdicts before BEGIN ─────────────────────────
+
+    /// The half-apply / lock-held holes: in a non-transactional batch a
+    /// mid-batch Deny used to leave earlier statements committed, because each
+    /// statement ran as soon as its card was answered. Now every verdict is
+    /// collected before any statement runs — so the moment stmt b's card
+    /// appears, stmt a (already Allowed) still has not run, and denying b
+    /// aborts the whole batch with nothing applied.
+    #[tokio::test]
+    async fn migration_deny_aborts_before_any_statement_runs() {
+        let Some(mut h) = setup().await else { return };
+        let core = h.core.clone();
+        let s = h.schema.clone();
+        let stmts = vec![
+            format!("CREATE TABLE {s}.a (id int)"),
+            format!("CREATE TABLE {s}.b (id int)"),
+        ];
+        let handle =
+            tokio::spawn(async move { execute_migration(&core, TEST_CONN, stmts, None).await });
+
+        // Approve WITHOUT a transaction — the mode that used to half-apply.
+        h.approve_migration(false).await;
+
+        // Allow stmt a's card.
+        let card_a = h.next_request_id("permission_required").await;
+        h.core
+            .pending_permissions
+            .resolve(&card_a, PermissionVerdict::Allow)
+            .await
+            .unwrap();
+
+        // stmt b's card now appears — proving the runner is still collecting
+        // verdicts and has not begun executing. Pre-fix, a would already exist.
+        let card_b = h.next_request_id("permission_required").await;
+        assert!(
+            !h.table_exists("a").await,
+            "no statement may run until every verdict is collected"
+        );
+
+        h.core
+            .pending_permissions
+            .resolve(&card_b, PermissionVerdict::Deny)
+            .await
+            .unwrap();
+
+        let r = handle.await.unwrap();
+        let a = h.table_exists("a").await;
+        let b = h.table_exists("b").await;
+        h.drop_schema().await;
+
+        r.expect_err("a denied deviation must abort the migration");
+        assert!(!a, "stmt a must not be left committed after the deny");
+        assert!(!b, "stmt b was denied");
+    }
+
+    /// Happy path: every deviation approved, transaction-wrapped — the batch
+    /// commits and all statements are present.
+    #[tokio::test]
+    async fn migration_all_approved_commits_atomically() {
+        let Some(mut h) = setup().await else { return };
+        let core = h.core.clone();
+        let s = h.schema.clone();
+        let stmts = vec![
+            format!("CREATE TABLE {s}.a (id int)"),
+            format!("CREATE TABLE {s}.b (id int)"),
+        ];
+        let handle =
+            tokio::spawn(async move { execute_migration(&core, TEST_CONN, stmts, None).await });
+
+        h.approve_migration(true).await;
+        h.resolve_next_permission(PermissionVerdict::Allow).await;
+        h.resolve_next_permission(PermissionVerdict::Allow).await;
+
+        let r = handle.await.unwrap();
+        let a = h.table_exists("a").await;
+        let b = h.table_exists("b").await;
+        h.drop_schema().await;
+
+        let results = r.expect("an all-approved migration should commit");
+        assert_eq!(results.len(), 2, "one result per statement");
+        assert!(a && b, "both statements committed");
+    }
+
+    /// The migration path re-gates Modified deviations too: editing a card
+    /// into a DROP is refused, and nothing runs.
+    #[tokio::test]
+    async fn migration_modified_into_drop_is_refused() {
+        let Some(mut h) = setup().await else { return };
+        sqlx::query(&format!("CREATE TABLE {}.victim (id int)", h.schema))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+
+        let core = h.core.clone();
+        let s = h.schema.clone();
+        let stmts = vec![format!("CREATE TABLE {s}.t (id int)")];
+        let handle =
+            tokio::spawn(async move { execute_migration(&core, TEST_CONN, stmts, None).await });
+
+        h.approve_migration(false).await;
+        let card = h.next_request_id("permission_required").await;
+        h.core
+            .pending_permissions
+            .resolve(&card, PermissionVerdict::Modified { sql: format!("DROP TABLE {s}.victim") })
+            .await
+            .unwrap();
+
+        let r = handle.await.unwrap();
+        let victim = h.table_exists("victim").await;
+        h.drop_schema().await;
+
+        let err = r.expect_err("a modified-into-DROP deviation must be refused");
+        assert!(err.to_string().contains("blocked"), "expected a block error, got: {err}");
+        assert!(victim, "the edited DROP must not have run");
     }
 }
