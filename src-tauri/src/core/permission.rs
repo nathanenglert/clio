@@ -23,6 +23,9 @@ use super::policy::Target;
 pub struct PermissionRequest {
     pub id: String,
     pub source: String,
+    /// Which agent raised this request (proxied-MCP path). `None` for UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub sql: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<String>,
@@ -67,6 +70,9 @@ pub enum PermissionVerdict {
 pub struct MigrationRequest {
     pub id: String,
     pub source: String,
+    /// Which agent raised this request (proxied-MCP path). `None` for UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<String>,
     pub statements: Vec<MigrationStatement>,
@@ -125,6 +131,47 @@ impl PendingMigrations {
     #[allow(dead_code)]
     pub async fn cancel(&self, id: &str) {
         let _ = self.inner.lock().await.remove(id);
+    }
+}
+
+// ── Connect approval ─────────────────────────────────────────────
+//
+// An agent may not open a database connection — a human must initiate it. The
+// agent's `connect` tool, when the database isn't already open, surfaces a
+// `connect_required` card; on approval the *human* core opens the pool and the
+// agent's call unblocks. See design/mcp-connection-authority.md §3 and
+// `lifecycle::request_connect`.
+
+/// Payload pushed on the activity stream for a connect-approval card.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectRequest {
+    pub id: String,
+    /// Saved-connection name the agent wants opened.
+    pub connection: String,
+    /// Which agent is asking. Resolves to a label via the presence roster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+}
+
+/// `request_id → (connection_name, sender)`. The connection name is held here
+/// (not just on the wire) so `resolve_connect` knows what to open on approval.
+#[derive(Default, Clone)]
+pub struct PendingConnects {
+    inner: Arc<Mutex<HashMap<String, (String, oneshot::Sender<bool>)>>>,
+}
+
+impl PendingConnects {
+    pub async fn register(&self, connection: String) -> (String, oneshot::Receiver<bool>) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.inner.lock().await.insert(id.clone(), (connection, tx));
+        (id, rx)
+    }
+
+    /// Remove and return a pending connect request by id (the connection name
+    /// + its sender), or `None` if unknown.
+    pub async fn take(&self, id: &str) -> Option<(String, oneshot::Sender<bool>)> {
+        self.inner.lock().await.remove(id)
     }
 }
 

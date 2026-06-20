@@ -65,7 +65,7 @@ async fn run_with_gate(
 
     // 2. Open the pool early — needed for EXPLAIN below and for running
     //    whatever statement comes out the other side of the gate.
-    let pool = core.pools.ensure(&core.meta, conn).await?;
+    let pool = core.pool(conn).await?;
 
     // 3. Row estimate via EXPLAIN — only meaningful for data writes. DDL
     //    rejects EXPLAIN; reads don't trigger row-bounded rules; TRUNCATE
@@ -98,6 +98,7 @@ async fn run_with_gate(
             let request = PermissionRequest {
                 id: id.clone(),
                 source: core.source.clone(),
+                agent_id: core.agent_id.clone(),
                 sql: sql.to_string(),
                 intent: intent.map(String::from),
                 op_kind: op_kind_str(stmt.kind.op_kind()).into(),
@@ -160,7 +161,8 @@ fn emit_permission_required(core: &Core, req: &PermissionRequest) {
         "pending",
         /* duration_ms */ 0,
     )
-    .with_payload(payload);
+    .with_payload(payload)
+    .with_agent(core.agent_id.clone());
     (core.emit)(evt);
 }
 
@@ -247,6 +249,7 @@ async fn run_migration_with_gate(
     let request = MigrationRequest {
         id: id.clone(),
         source: core.source.clone(),
+        agent_id: core.agent_id.clone(),
         intent: intent.map(String::from),
         statements: classified.clone(),
     };
@@ -272,7 +275,7 @@ async fn run_migration_with_gate(
     };
 
     // Open the pool and (optionally) BEGIN a transaction.
-    let pool = core.pools.ensure(&core.meta, conn).await?;
+    let pool = core.pool(conn).await?;
     let mut tx_opt = if wrap_in_tx {
         Some(pool.begin().await.context("begin migration transaction")?)
     } else {
@@ -292,6 +295,7 @@ async fn run_migration_with_gate(
             let req = PermissionRequest {
                 id: rid.clone(),
                 source: core.source.clone(),
+                agent_id: core.agent_id.clone(),
                 sql: original_sql.clone(),
                 intent: intent.map(String::from),
                 op_kind: stmt_verdict.op_kind.clone(),
@@ -365,7 +369,8 @@ fn emit_migration_required(core: &Core, req: &MigrationRequest) {
         "pending",
         0,
     )
-    .with_payload(payload);
+    .with_payload(payload)
+    .with_agent(core.agent_id.clone());
     (core.emit)(evt);
 }
 

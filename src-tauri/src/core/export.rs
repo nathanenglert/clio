@@ -40,7 +40,7 @@ pub async fn export_query(
         if format != "csv" && format != "json" {
             return Err(anyhow!("unsupported export format: {}", format));
         }
-        let pool = core.pools.ensure(&core.meta, conn).await?;
+        let pool = core.pool(conn).await?;
 
         let redactor_view: Option<Arc<RedactorView>> = if reveal {
             None

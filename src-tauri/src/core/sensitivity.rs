@@ -120,7 +120,7 @@ pub(crate) fn classify_column(
 pub async fn classify_schema(core: &Core, conn: &str) -> Result<ClassifyOutcome> {
     let started = Instant::now();
     let r = async {
-        let pool = core.pools.ensure(&core.meta, conn).await?;
+        let pool = core.pool(conn).await?;
         // Pull every column + its COMMENT, excluding system schemas.
         let rows = sqlx::query(
             r#"

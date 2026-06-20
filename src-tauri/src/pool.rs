@@ -9,6 +9,19 @@ use tokio::sync::Mutex;
 use crate::connections;
 use crate::types::Connection;
 
+/// Who is asking for a pool. The two variants gate the *only* difference that
+/// matters for connection authority: a human-driven core may open a pool on
+/// demand; an agent-driven core may only ever use a pool a human already
+/// opened. This is the single capability that makes "a human initiates the
+/// connection" structural rather than advisory — see `Core::pool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolAccess {
+    /// UI / human path. `Core::pool` resolves via `ensure` (auto-open).
+    Human,
+    /// Agent / MCP path. `Core::pool` resolves via `get_open` (never opens).
+    Agent,
+}
+
 #[derive(Default, Clone)]
 pub struct PoolRegistry {
     inner: Arc<Mutex<HashMap<String, PgPool>>>,
@@ -17,6 +30,13 @@ pub struct PoolRegistry {
 impl PoolRegistry {
     pub async fn is_connected(&self, name: &str) -> bool {
         self.inner.lock().await.contains_key(name)
+    }
+
+    /// Return an already-open pool, or `None`. **Never opens a new pool.**
+    /// This is the agent path's only way to reach Postgres, so it cannot
+    /// connect to a database a human hasn't already opened in the workbench.
+    pub async fn get_open(&self, name: &str) -> Option<PgPool> {
+        self.inner.lock().await.get(name).cloned()
     }
 
     pub async fn drop_pool(&self, name: &str) {

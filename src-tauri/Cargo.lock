@@ -655,6 +655,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "keyring",
+ "libc",
  "once_cell",
  "rand",
  "rmcp",

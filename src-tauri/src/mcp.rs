@@ -1,17 +1,19 @@
-//! rmcp 1.7 server. Tool handlers call into `core::*` exactly the way the
-//! Tauri commands do — same functions, same emitter, same activity events.
-
-use std::time::Instant;
+//! rmcp 1.7 server — a thin proxy. Each DB-touching tool forwards a
+//! `ToolCall` over the Unix socket to the running UI process (see
+//! `bridge.rs`), which owns the only Postgres pool and credentials and runs
+//! the call only if a human has connected that database. This process holds no
+//! pool, no credentials, and no metadata DB.
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     schemars,
+    service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router,
     ErrorData as McpError, ServerHandler,
 };
 
-use crate::core::{self, Core};
+use crate::bridge::{ProxyClient, ToolCall};
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ConnArg {
@@ -78,45 +80,30 @@ pub struct ExecuteMigrationArg {
     pub intent: Option<String>,
 }
 
-/// Cap full-text payloads (e.g. SQL) emitted on activity events so a long
-/// statement can't blow the socket reader's line buffer. Mirrors
-/// core::query::cap_payload — duplicated here because that helper is
-/// module-private and the constant is small.
-const PROPOSE_PAYLOAD_MAX_BYTES: usize = 4096;
-fn cap_payload(s: &str) -> String {
-    if s.len() <= PROPOSE_PAYLOAD_MAX_BYTES {
-        return s.to_string();
-    }
-    let mut end = PROPOSE_PAYLOAD_MAX_BYTES;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut out = String::with_capacity(end + 4);
-    out.push_str(&s[..end]);
-    out.push_str(" …");
-    out
-}
-
 #[derive(Clone)]
 pub struct McpServer {
-    core: Core,
+    proxy: ProxyClient,
     #[allow(dead_code)] // populated for the #[tool_router] macro
     tool_router: ToolRouter<McpServer>,
 }
 
 impl McpServer {
-    pub fn new(core: Core) -> Self {
+    pub fn new(proxy: ProxyClient) -> Self {
         Self {
-            core,
+            proxy,
             tool_router: Self::tool_router(),
         }
     }
-}
 
-fn ok_json(v: impl serde::Serialize) -> Result<CallToolResult, McpError> {
-    let json = serde_json::to_string_pretty(&v)
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+    /// Forward a tool call to the UI and wrap its JSON result. Every DB tool
+    /// goes through here, so there is no code path in this process that
+    /// touches Postgres directly.
+    async fn forward(&self, call: ToolCall) -> Result<CallToolResult, McpError> {
+        let value = self.proxy.call(call).await.map_err(err)?;
+        let json = serde_json::to_string_pretty(&value)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 fn err(e: anyhow::Error) -> McpError {
@@ -127,17 +114,15 @@ fn err(e: anyhow::Error) -> McpError {
 impl McpServer {
     #[tool(description = "List saved connections in the workbench. Returns name/host/port/database/username/ssl_mode/connected. Passwords are never returned.")]
     async fn list_connections(&self) -> Result<CallToolResult, McpError> {
-        let r = core::list_connections(&self.core).await.map_err(err)?;
-        ok_json(r)
+        self.forward(ToolCall::ListConnections).await
     }
 
-    #[tool(description = "Open (or re-open) a Postgres pool for the named connection and ping it. Idempotent.")]
+    #[tool(description = "Report whether the workbench is currently connected to the named database. Cannot open a connection: a human must connect the database in the workbench first. Returns connected:true when usable, or an error telling you to ask the human to connect it.")]
     async fn connect(
         &self,
         Parameters(ConnArg { connection }): Parameters<ConnArg>,
     ) -> Result<CallToolResult, McpError> {
-        core::connect(&self.core, &connection).await.map_err(err)?;
-        ok_json(serde_json::json!({ "connected": connection }))
+        self.forward(ToolCall::Connect { connection }).await
     }
 
     #[tool(description = "List non-system schemas for the named connection.")]
@@ -145,8 +130,7 @@ impl McpServer {
         &self,
         Parameters(ConnArg { connection }): Parameters<ConnArg>,
     ) -> Result<CallToolResult, McpError> {
-        let r = core::list_schemas(&self.core, &connection).await.map_err(err)?;
-        ok_json(r)
+        self.forward(ToolCall::ListSchemas { connection }).await
     }
 
     #[tool(description = "List tables/views/matviews in the given schema. Returns objects with `name`, `kind` (table|view|matview|partitioned|foreign), and `row_estimate` (planner estimate from pg_class.reltuples; omitted if never analyzed).")]
@@ -154,10 +138,7 @@ impl McpServer {
         &self,
         Parameters(SchemaArg { connection, schema }): Parameters<SchemaArg>,
     ) -> Result<CallToolResult, McpError> {
-        let r = core::list_tables(&self.core, &connection, &schema)
-            .await
-            .map_err(err)?;
-        ok_json(r)
+        self.forward(ToolCall::ListTables { connection, schema }).await
     }
 
     #[tool(description = "Describe a relation. Returns: `kind` (table|view|matview|partitioned|foreign), `columns` (name/data_type/is_nullable/default/is_primary_key/enum_values), `indexes` (name/definition/is_unique/is_primary/columns), `constraints` (name/kind=primary_key|foreign_key|unique|check|exclusion, definition, columns, references for FK), `triggers` (name/timing/events/level/definition; FK-synthesized triggers excluded), and `view_definition` (sql + is_materialized) when the relation is a view or matview.")]
@@ -169,10 +150,12 @@ impl McpServer {
             table,
         }): Parameters<TableArg>,
     ) -> Result<CallToolResult, McpError> {
-        let r = core::describe_table(&self.core, &connection, &schema, &table)
-            .await
-            .map_err(err)?;
-        ok_json(r)
+        self.forward(ToolCall::DescribeTable {
+            connection,
+            schema,
+            table,
+        })
+        .await
     }
 
     #[tool(description = "Run a SELECT (or WITH-prefixed SELECT) and return columns + rows. Writes/DDL are rejected at the POC seam. Capped at 1000 rows; the `truncated` field signals overflow. Columns classified as PHI/PCI/PII are always redacted on the MCP path — see redaction_meta.")]
@@ -180,14 +163,9 @@ impl McpServer {
         &self,
         Parameters(QueryArg { connection, sql }): Parameters<QueryArg>,
     ) -> Result<CallToolResult, McpError> {
-        // ── Privacy invariant ─────────────────────────────────────
-        // The MCP handler ALWAYS calls core::run_query with reveal=false. The
-        // workbench UI's `View > Reveal sensitive data` toggle CANNOT reach
-        // this code path — see design/redaction.md §"MCP scope".
-        let r = core::run_query(&self.core, &connection, &sql, /* reveal */ false)
-            .await
-            .map_err(err)?;
-        ok_json(r)
+        // The privacy invariant (reveal=false on the MCP path) is enforced UI-
+        // side in the dispatcher — see bridge::dispatch and design/redaction.md.
+        self.forward(ToolCall::RunQuery { connection, sql }).await
     }
 
     #[tool(description = "Open a new query tab in the workbench with the given SQL and switch the human to it. Use this when you want the human to REVIEW a query before running it — the tab is marked 'written by agent' and will NOT auto-run; the human reviews and presses Run themselves. The tab opens under whichever connection the human is currently viewing (no connection arg). Returns immediately; the tool succeeds even if no UI is attached.")]
@@ -195,16 +173,7 @@ impl McpServer {
         &self,
         Parameters(ProposeQueryArg { sql, title }): Parameters<ProposeQueryArg>,
     ) -> Result<CallToolResult, McpError> {
-        let started = Instant::now();
-        let detail = title.unwrap_or_else(|| "Proposed query".to_string());
-        let payload = Some(cap_payload(&sql));
-        // Fire-and-forget on the activity socket. We construct a synthetic
-        // Ok result so record_ok_with_payload emits a status="ok" event; the
-        // frontend listener turns it into a new agent-authored tab + toast.
-        let result: anyhow::Result<()> = Ok(());
-        self.core
-            .record_ok_with_payload("propose_query", detail.clone(), payload, started, &result);
-        ok_json(serde_json::json!({ "proposed": true, "title": detail }))
+        self.forward(ToolCall::ProposeQuery { sql, title }).await
     }
 
     #[tool(description = "Run a SQL statement (any kind — SELECT/INSERT/UPDATE/DELETE/DDL) through the workbench's permission gate. Reads inside the policy run immediately. Writes/DDL pause and ask the human via a permission card; the human can allow, deny, or modify the SQL before running. Returns rows on success (empty rows + empty columns for writes/DDL without RETURNING). Pass `intent` to surface a plain-English description on the card. Distinct from `propose_query`: that opens a tab for review and never runs; this is for the agent's own gated execution.")]
@@ -216,10 +185,12 @@ impl McpServer {
             intent,
         }): Parameters<ExecuteStatementArg>,
     ) -> Result<CallToolResult, McpError> {
-        let r = core::execute_statement(&self.core, &connection, &sql, intent.as_deref())
-            .await
-            .map_err(err)?;
-        ok_json(r)
+        self.forward(ToolCall::ExecuteStatement {
+            connection,
+            sql,
+            intent,
+        })
+        .await
     }
 
     #[tool(description = "Run a multi-statement migration through the workbench's bulk permission gate. The full plan (numbered, with policy verdicts per statement) is shown to the human; they approve once with a transaction-wrap toggle, then each deviation pauses one-by-one for individual approval. Any denial or runtime error rolls back the whole batch when transactions are enabled (default). Each entry in `statements` MUST be exactly one SQL statement. Pass `intent` to describe the migration's purpose on the bulk card.")]
@@ -231,16 +202,43 @@ impl McpServer {
             intent,
         }): Parameters<ExecuteMigrationArg>,
     ) -> Result<CallToolResult, McpError> {
-        let r =
-            core::execute_migration(&self.core, &connection, statements, intent.as_deref())
-                .await
-                .map_err(err)?;
-        ok_json(r)
+        self.forward(ToolCall::ExecuteMigration {
+            connection,
+            statements,
+            intent,
+        })
+        .await
     }
 }
 
 #[tool_handler]
 impl ServerHandler for McpServer {
+    /// Capture the real client identity from the MCP handshake so the
+    /// workbench's agent roster shows "Claude Code" / "Cursor" / etc. instead
+    /// of a generic label. The handshake always precedes the first tool call
+    /// (which is what lazily opens the proxy socket), so the captured name is
+    /// in place before the Hello frame is sent. Preserves the default
+    /// `set_peer_info` behavior the rest of rmcp relies on.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        let info = &request.client_info;
+        let label = info
+            .title
+            .clone()
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| info.name.clone());
+        if !label.is_empty() {
+            self.proxy.set_label(label);
+        }
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        Ok(self.get_info())
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()
@@ -249,7 +247,7 @@ impl ServerHandler for McpServer {
         )
         .with_server_info(Implementation::from_build_env())
         .with_instructions(
-            "Postgres workbench MCP server. Tools: list_connections, connect, list_schemas, list_tables, describe_table, run_query, propose_query, execute_statement, execute_migration. All schema/query tools require a `connection` arg matching a name from list_connections. `run_query` is SELECT-only and never prompts. `propose_query` opens a tab for human review (does not run). `execute_statement` is the gated runner for a single statement — reads run immediately if policy allows, writes/DDL pause for human approval. `execute_migration` is the bulk variant — show the plan, approve once, runs in a transaction with per-deviation prompts.",
+            "Postgres workbench MCP server. Tools: list_connections, connect, list_schemas, list_tables, describe_table, run_query, propose_query, execute_statement, execute_migration. All schema/query tools require a `connection` arg matching a name from list_connections. The workbench (a desktop app the human runs) owns every database connection: a human must open a connection there before any tool can use it — `connect` only reports whether that has happened. `run_query` is SELECT-only and never prompts. `propose_query` opens a tab for human review (does not run). `execute_statement` is the gated runner for a single statement — reads run immediately if policy allows, writes/DDL pause for human approval. `execute_migration` is the bulk variant — show the plan, approve once, runs in a transaction with per-deviation prompts.",
         )
     }
 }
