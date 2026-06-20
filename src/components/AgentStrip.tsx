@@ -135,6 +135,7 @@ export function AgentStrip({ status, agents = [], lastEvent, focusedTable, now, 
       <div style={{ flex: 1 }} />
       {awaiting && (
         <button
+          onClick={onExpand}
           style={{
             height: 22,
             padding: "0 12px",
