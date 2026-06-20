@@ -1,0 +1,22 @@
+name: PR Title Lint
+
+# The repo squash-merges, and the squash commit title is forced to the PR
+# title (repo setting). That title is what release-please parses to decide the
+# next version, so it MUST be a valid Conventional Commit (feat:, fix:,
+# chore:, ci:, feat!:, …). This gate blocks a PR whose title isn't.
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint-title:
+    name: Validate PR title (Conventional Commits)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
