@@ -7,6 +7,7 @@ import {
   onAgentPresence,
   type ActivityEvent,
   type AgentInfo,
+  type BuildInfo,
   type ConnectRequest,
   type Connection,
   type MigrationRequest,
@@ -66,6 +67,8 @@ export function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   // Live roster of connected agents (from the `agent_presence` event).
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  // Build metadata for the status bar (version + DEV pill). Fetched once.
+  const [build, setBuild] = useState<BuildInfo | null>(null);
 
   // Bridge from the once-mounted activity listener (closure capture) to the
   // live `tabs` API — populated below after useTabs runs. Used so
@@ -100,6 +103,11 @@ export function App() {
       console.error(e);
     }
   };
+
+  // One-shot build metadata for the status-bar badge.
+  useEffect(() => {
+    api.build_info().then(setBuild).catch(() => {});
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -838,8 +846,18 @@ export function App() {
           <span aria-hidden style={{ color: "var(--op-write)" }}>⚖</span>
           <span>policy: default</span>
         </button>
-        <span style={{ marginLeft: "auto", color: "var(--text-faint)" }}>
-          POC v0.0
+        <span className="status-build">
+          {build?.is_dev && (
+            <span
+              className="dev-pill"
+              title="Development build — secrets live in dev-secrets.json, not the OS keyring"
+            >
+              DEV
+            </span>
+          )}
+          <span style={{ color: "var(--text-faint)" }}>
+            {build ? `v${build.version}` : "…"}
+          </span>
         </span>
       </div>
 

@@ -1,0 +1,57 @@
+name: CI
+
+# Gate on every PR so broken changes never reach main — release-please depends
+# on a clean main to cut releases from.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend typecheck & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck and build (tsc -b && vite build)
+        run: pnpm build
+
+  rust:
+    name: Rust check & tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      # The lib embeds the frontend via tauri::generate_context!, which reads
+      # frontendDist (../dist) at compile time — so dist/ must exist before any
+      # cargo command, even `check`.
+      - name: Build frontend (needed for generate_context!)
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml

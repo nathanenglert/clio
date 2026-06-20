@@ -146,6 +146,29 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   background: var(--line-soft);
 }
 
+.status-build {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* "DEV" badge — only shown in debug builds. Gold (caution, not alarm) to
+   rhyme with the policy chip without borrowing the agent copper or the
+   destructive red. */
+.dev-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--op-write);
+  background: var(--op-write-soft);
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
+  line-height: 1.5;
+}
+
 /* ── Rail / schema tree ───────────────────────────────────────────── */
 
 /* ── Schema browser (rail) ────────────────────────────────────────── */

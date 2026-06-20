@@ -247,6 +247,24 @@ fn list_policy_rules(_connection: Option<String>) -> Vec<core::policy::Rule> {
     core::policy::default_rules()
 }
 
+/// Build metadata for the status-bar badge. `is_dev` is `cfg!(debug_assertions)`
+/// — the exact same compile-time flag that routes secret storage to
+/// `dev-secrets.json` vs the OS keyring (see `connections.rs`), so the DEV
+/// badge can never disagree with the actual build mode.
+#[derive(serde::Serialize)]
+struct BuildInfo {
+    version: String,
+    is_dev: bool,
+}
+
+#[tauri::command]
+fn build_info<R: Runtime>(app: tauri::AppHandle<R>) -> BuildInfo {
+    BuildInfo {
+        version: app.package_info().version.to_string(),
+        is_dev: cfg!(debug_assertions),
+    }
+}
+
 /// Set the reveal-sensitive toggle state. Updates the View menu's checkmark
 /// and emits the `reveal-sensitive` event, mirroring what the native menu
 /// item does. Called from the command palette so the toggle is reachable
@@ -625,6 +643,7 @@ pub fn run() {
             resolve_migration,
             resolve_connect,
             list_policy_rules,
+            build_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
