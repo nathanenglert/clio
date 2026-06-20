@@ -391,6 +391,15 @@ export type AgentInfo = {
   since_ms: number;
 };
 
+// ── Build metadata ───────────────────────────────────────────────
+// Drives the status-bar version + DEV pill. `is_dev` is the backend's
+// cfg!(debug_assertions) — the same flag that selects dev-secrets.json vs the
+// OS keyring — so the badge always reflects the real build mode.
+export type BuildInfo = {
+  version: string;
+  is_dev: boolean;
+};
+
 export const api = {
   list_connections: () => invoke<Connection[]>("list_connections"),
   add_connection: (input: NewConnectionInput) =>
@@ -462,6 +471,7 @@ export const api = {
     invoke<void>("resolve_connect", { id, approve }),
   list_policy_rules: (connection: string | null = null) =>
     invoke<PolicyRule[]>("list_policy_rules", { connection }),
+  build_info: () => invoke<BuildInfo>("build_info"),
 };
 
 export function onActivity(
