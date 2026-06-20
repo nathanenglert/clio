@@ -1,0 +1,90 @@
+name: Release
+
+# Two-stage release pipeline:
+#  1. release-please watches main and maintains a standing "release PR" that
+#     accumulates Conventional Commits. Merging that PR bumps the version in
+#     package.json + Cargo.toml + tauri.conf.json, tags it, writes the
+#     CHANGELOG, and cuts a DRAFT GitHub release.
+#  2. The build job (gated on release_created) builds the macOS Apple Silicon
+#     bundle and attaches it to that draft. You publish the draft once you've
+#     confirmed the bundle uploaded — that human "publish" step is the gate
+#     that a build is actually good before users can download it.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PR / draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-macos:
+    name: Build macOS (Apple Silicon)
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: macos-latest # GitHub's macos-latest is Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10 # matches pnpm-lock.yaml lockfileVersion 9.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install Rust (Apple Silicon target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build bundle and attach it to the draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Ad-hoc signing (no paid Apple Developer account). This keeps Apple
+          # Silicon users off the scary "Clio is damaged and can't be opened"
+          # Gatekeeper error. There is NO notarization yet, so a downloaded
+          # build is still quarantined — clear it once on first launch:
+          #   xattr -dr com.apple.quarantine /Applications/Clio.app
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          # release-please already created the (draft) release; match its tag
+          # and draft status so tauri-action uploads to it instead of making a
+          # second release.
+          tagName: ${{ needs.release-please.outputs.tag_name }}
+          releaseName: Clio ${{ needs.release-please.outputs.tag_name }}
+          releaseDraft: true
+          prerelease: false
+          args: --target aarch64-apple-darwin
