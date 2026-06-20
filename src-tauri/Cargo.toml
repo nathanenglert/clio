@@ -1,6 +1,6 @@
 [package]
 name = "database-app"
-version = "0.0.1"
+version = "0.1.0"
 description = "Postgres workbench you watch from"
 edition = "2021"
 rust-version = "1.77"
