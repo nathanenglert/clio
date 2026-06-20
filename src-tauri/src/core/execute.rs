@@ -121,7 +121,15 @@ async fn run_with_gate(
                         request.rule_label
                     ));
                 }
-                PermissionVerdict::Modified { sql: new_sql } => new_sql,
+                PermissionVerdict::Modified { sql: new_sql } => {
+                    // The human may have rewritten the statement entirely — a
+                    // benign Prompt card edited into a DROP, say. Re-evaluate
+                    // the edit against the same policy before it runs; a Block
+                    // verdict here is the human editing past a hard gate, and
+                    // must be refused. See `regate_modified`.
+                    regate_modified(&rules, &new_sql)?;
+                    new_sql
+                }
             }
         }
     };
@@ -145,6 +153,34 @@ async fn estimate_rows(pool: &sqlx::PgPool, sql: &str) -> Option<u64> {
         .get("Plan Rows")?
         .as_f64()
         .map(|n| n.round().max(0.0) as u64)
+}
+
+/// Re-evaluate human-edited SQL before it runs. When a user approves a Prompt
+/// card with a modification, the new SQL must clear the same policy a fresh
+/// statement would — otherwise the gate is trivially bypassed by editing an
+/// allowed-looking statement into a destructive one. A `Block` verdict is
+/// refused; `Allow`/`Prompt` are the human's explicit, in-policy choice and
+/// run. Multi-statement or unparseable edits are rejected outright so a single
+/// approval can't smuggle extra statements.
+///
+/// No row estimate is supplied: no `Block` rule depends on one (they relax the
+/// row-bounded `Allow` rules, never escalate to `Block`), and re-running
+/// `EXPLAIN` here would add a round-trip for no security gain.
+fn regate_modified(rules: &[policy::Rule], new_sql: &str) -> Result<()> {
+    let stmts = policy::parse_sql(new_sql)
+        .map_err(|e| anyhow!("modified SQL did not parse: {e}"))?;
+    if stmts.len() != 1 {
+        return Err(anyhow!(
+            "modified SQL must be exactly one statement; got {}",
+            stmts.len()
+        ));
+    }
+    match policy::evaluate(rules, &stmts[0], None) {
+        Verdict::Block { rule, reason } => Err(anyhow!(
+            "modified SQL blocked by policy '{rule}': {reason}"
+        )),
+        Verdict::Allow { .. } | Verdict::Prompt { .. } => Ok(()),
+    }
 }
 
 fn emit_permission_required(core: &Core, req: &PermissionRequest) {
@@ -420,6 +456,8 @@ mod tests {
     use super::*;
     use crate::activity::EmitFn;
     use crate::connections;
+    use crate::core::permission::PermissionVerdict;
+    use crate::core::policy;
     use crate::core::Core;
     use crate::pool::PoolRegistry;
     use crate::types::{ActivityEvent, NewConnectionInput};
@@ -551,5 +589,92 @@ mod tests {
         h.drop_schema().await;
         let res = r.expect("an allowed SELECT should run");
         assert_eq!(res.row_count, 1, "SELECT 1 returns one row");
+    }
+
+    // ── Phase 2: re-gate human-edited (Modified) SQL ─────────────────────
+
+    /// Pure check on the re-gate decision: Block-class edits are refused;
+    /// in-policy edits pass; multi-statement / unparseable edits are rejected.
+    #[test]
+    fn regate_modified_refuses_block_and_multi_statement() {
+        let rules = policy::default_rules();
+        assert!(regate_modified(&rules, "DROP TABLE foo").is_err(), "DROP TABLE is Block");
+        assert!(regate_modified(&rules, "DROP SCHEMA bar").is_err(), "DROP SCHEMA is Block");
+        assert!(regate_modified(&rules, "SELECT 1").is_ok(), "reads are fine");
+        assert!(
+            regate_modified(&rules, "CREATE TABLE foo (id int)").is_ok(),
+            "a Prompt-class edit is the human's explicit choice and runs"
+        );
+        assert!(
+            regate_modified(&rules, "SELECT 1; SELECT 2").is_err(),
+            "an edit can't smuggle multiple statements"
+        );
+        assert!(regate_modified(&rules, "NOT SQL AT ALL").is_err(), "unparseable is refused");
+    }
+
+    /// The hole this closes: a human approves a benign-looking Prompt card but
+    /// rewrites it into a `DROP TABLE`. The edit must be re-gated and refused,
+    /// and neither the original nor the edited statement may run.
+    #[tokio::test]
+    async fn modified_into_drop_is_refused_and_nothing_runs() {
+        let Some(mut h) = setup().await else { return };
+        sqlx::query(&format!("CREATE TABLE {}.victim (id int)", h.schema))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+
+        let core = h.core.clone();
+        let create = format!("CREATE TABLE {}.t (id int)", h.schema); // Prompt-class
+        let handle = tokio::spawn(async move {
+            execute_statement(&core, TEST_CONN, &create, None).await
+        });
+
+        let id = h.next_request_id("permission_required").await;
+        let drop_sql = format!("DROP TABLE {}.victim", h.schema);
+        h.core
+            .pending_permissions
+            .resolve(&id, PermissionVerdict::Modified { sql: drop_sql })
+            .await
+            .unwrap();
+
+        let r = handle.await.unwrap();
+        let victim = h.table_exists("victim").await;
+        let t = h.table_exists("t").await;
+        h.drop_schema().await;
+
+        let err = r.expect_err("a modified-into-DROP edit must be refused");
+        assert!(err.to_string().contains("blocked"), "expected a block error, got: {err}");
+        assert!(victim, "the edited DROP must not have run");
+        assert!(!t, "the original CREATE must not have run either");
+    }
+
+    /// The re-gate must not over-block: an edit that stays within policy still
+    /// runs (the human's explicit choice), and the original is discarded.
+    #[tokio::test]
+    async fn modified_within_policy_runs() {
+        let Some(mut h) = setup().await else { return };
+
+        let core = h.core.clone();
+        let original = format!("CREATE TABLE {}.orig (id int)", h.schema);
+        let handle = tokio::spawn(async move {
+            execute_statement(&core, TEST_CONN, &original, None).await
+        });
+
+        let id = h.next_request_id("permission_required").await;
+        let edited = format!("CREATE TABLE {}.edited (id int)", h.schema);
+        h.core
+            .pending_permissions
+            .resolve(&id, PermissionVerdict::Modified { sql: edited })
+            .await
+            .unwrap();
+
+        let r = handle.await.unwrap();
+        let edited_exists = h.table_exists("edited").await;
+        let orig_exists = h.table_exists("orig").await;
+        h.drop_schema().await;
+
+        r.expect("an in-policy modified statement should run");
+        assert!(edited_exists, "the edited statement should have run");
+        assert!(!orig_exists, "the original statement should not have run");
     }
 }
