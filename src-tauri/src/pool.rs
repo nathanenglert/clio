@@ -90,6 +90,15 @@ impl PoolRegistry {
         let conn = connections::get(meta, name).await?;
         self.connect(&conn).await
     }
+
+    /// Test-only: register an already-open pool under `name`, bypassing the
+    /// secret store and metadata lookup that `connect`/`ensure` require. Lets
+    /// integration tests point a `Core` at a live test database without
+    /// standing up the keychain or a real connection record.
+    #[cfg(test)]
+    pub(crate) async fn insert_for_test(&self, name: &str, pool: PgPool) {
+        self.inner.lock().await.insert(name.to_string(), pool);
+    }
 }
 
 fn parse_ssl_mode(s: &str) -> PgSslMode {

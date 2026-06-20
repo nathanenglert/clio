@@ -403,3 +403,153 @@ fn stmt_kind_str(k: StmtKind) -> &'static str {
         StmtKind::Other => "other",
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Integration tests for the gated runner.
+//
+// These drive `execute_statement` / `execute_migration` end-to-end against a
+// real Postgres — the in-repo dev database (see `dev/db.sh`). Each test runs
+// in a throwaway schema and skips (does not fail) when the DB is unreachable,
+// so `cargo test` stays green on a box without it.
+//
+//   TEST_DATABASE_URL  overrides the target (default: the dev DB on :5433).
+//   Start the DB with `dev/db.sh up`.
+// ─────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::activity::EmitFn;
+    use crate::connections;
+    use crate::core::Core;
+    use crate::pool::PoolRegistry;
+    use crate::types::{ActivityEvent, NewConnectionInput};
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::PgPool;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+
+    const TEST_CONN: &str = "testdb";
+
+    fn test_db_url() -> String {
+        std::env::var("TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://workbench:workbench@localhost:5433/workbench".into())
+    }
+
+    /// A `Core` wired to the live test DB, plus the captured activity stream
+    /// and a private throwaway schema for the test to mutate.
+    struct Harness {
+        core: Core,
+        events: UnboundedReceiver<ActivityEvent>,
+        pool: PgPool,
+        schema: String,
+    }
+
+    /// Build a [`Harness`], or return `None` (and print a skip notice) when the
+    /// test DB is unreachable. The Postgres pool is injected directly into the
+    /// registry, so no secret-store or real connection record is needed; the
+    /// in-memory metadata DB just carries the `testdb` row `run_decoded` reads.
+    async fn setup() -> Option<Harness> {
+        let pool = match PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(3))
+            .connect(&test_db_url())
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "SKIP integration test: DB unreachable at {} ({e}). \
+                     Start it with `dev/db.sh up` or set TEST_DATABASE_URL.",
+                    test_db_url()
+                );
+                return None;
+            }
+        };
+
+        let meta = connections::open_metadata_in_memory().await.unwrap();
+        connections::insert(
+            &meta,
+            &NewConnectionInput {
+                name: TEST_CONN.into(),
+                host: "localhost".into(),
+                port: 0,
+                database: "workbench".into(),
+                username: "workbench".into(),
+                password: String::new(), // empty ⇒ never touches the secret store
+                ssl_mode: "disable".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let pools = PoolRegistry::default();
+        pools.insert_for_test(TEST_CONN, pool.clone()).await;
+
+        let (tx, rx) = unbounded_channel();
+        let emit: EmitFn = Arc::new(move |e| {
+            let _ = tx.send(e);
+        });
+
+        // The agent core mirrors the production caller of the gated runner.
+        let (_human, agent) = Core::ui_with_agent(meta, pools, emit);
+
+        let schema = format!("it_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        Some(Harness {
+            core: agent,
+            events: rx,
+            pool,
+            schema,
+        })
+    }
+
+    impl Harness {
+        async fn drop_schema(&self) {
+            let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema))
+                .execute(&self.pool)
+                .await;
+        }
+
+        /// Await the next activity event whose `tool` matches, and return the
+        /// `id` from its JSON payload (a `PermissionRequest`/`MigrationRequest`).
+        async fn next_request_id(&mut self, tool: &str) -> String {
+            loop {
+                let evt = tokio::time::timeout(Duration::from_secs(5), self.events.recv())
+                    .await
+                    .expect("timed out waiting for an activity event")
+                    .expect("activity channel closed");
+                if evt.tool == tool {
+                    let payload = evt.payload.expect("permission event carries a payload");
+                    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                    return v["id"].as_str().unwrap().to_string();
+                }
+            }
+        }
+
+        async fn table_exists(&self, table: &str) -> bool {
+            sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+                .bind(format!("{}.{}", self.schema, table))
+                .fetch_one(&self.pool)
+                .await
+                .unwrap()
+        }
+    }
+
+    /// Smoke test: the harness can drive `execute_statement` end-to-end through
+    /// the Allow branch against the live DB and get rows back. Proves the wiring
+    /// (injected pool + in-memory meta + redactor short-circuit) before the
+    /// behavioral fixes build on it.
+    #[tokio::test]
+    async fn allow_read_runs_against_test_db() {
+        let Some(h) = setup().await else { return };
+        let r = execute_statement(&h.core, TEST_CONN, "SELECT 1 AS one", None).await;
+        h.drop_schema().await;
+        let res = r.expect("an allowed SELECT should run");
+        assert_eq!(res.row_count, 1, "SELECT 1 returns one row");
+    }
+}

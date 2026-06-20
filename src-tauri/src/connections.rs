@@ -218,6 +218,53 @@ pub async fn open_metadata() -> Result<SqlitePool> {
     Ok(pool)
 }
 
+/// Test-only metadata DB: an in-memory SQLite with just the tables the
+/// gated-runner path reads — `connections` (for [`get`]) and
+/// `sensitivity_classifications` (for the redactor view). `max_connections(1)`
+/// keeps the single in-memory database alive for the pool's lifetime (a
+/// shared `:memory:` would otherwise vanish between connections). Kept in sync
+/// with the DDL in [`open_metadata`] by the integration tests, which fail
+/// loudly if a column drifts.
+#[cfg(test)]
+pub(crate) async fn open_metadata_in_memory() -> Result<SqlitePool> {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE connections (
+            id          TEXT PRIMARY KEY,
+            name        TEXT UNIQUE NOT NULL,
+            host        TEXT NOT NULL,
+            port        INTEGER NOT NULL,
+            database    TEXT NOT NULL,
+            username    TEXT NOT NULL,
+            ssl_mode    TEXT NOT NULL,
+            created_at  INTEGER NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE sensitivity_classifications (
+            connection_id TEXT NOT NULL,
+            schema_name   TEXT NOT NULL,
+            table_name    TEXT NOT NULL,
+            column_name   TEXT NOT NULL,
+            category      TEXT NOT NULL,
+            status        TEXT NOT NULL,
+            reason        TEXT NOT NULL,
+            created_at    INTEGER NOT NULL,
+            PRIMARY KEY (connection_id, schema_name, table_name, column_name)
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+    Ok(pool)
+}
+
 const CONNECTION_COLUMNS: &str = "id, name, host, port, database, username, ssl_mode";
 
 fn row_to_connection(r: &sqlx::sqlite::SqliteRow) -> Connection {
