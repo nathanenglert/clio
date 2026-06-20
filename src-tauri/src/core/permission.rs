@@ -105,19 +105,22 @@ pub enum MigrationVerdict {
 
 #[derive(Default, Clone)]
 pub struct PendingMigrations {
-    inner: Arc<Mutex<HashMap<String, oneshot::Sender<MigrationVerdict>>>>,
+    inner: Arc<Mutex<HashMap<String, (Option<String>, oneshot::Sender<MigrationVerdict>)>>>,
 }
 
 impl PendingMigrations {
-    pub async fn register(&self) -> (String, oneshot::Receiver<MigrationVerdict>) {
+    pub async fn register(
+        &self,
+        agent_id: Option<String>,
+    ) -> (String, oneshot::Receiver<MigrationVerdict>) {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        self.inner.lock().await.insert(id.clone(), tx);
+        self.inner.lock().await.insert(id.clone(), (agent_id, tx));
         (id, rx)
     }
 
     pub async fn resolve(&self, id: &str, verdict: MigrationVerdict) -> Result<(), String> {
-        let tx = self
+        let (_agent, tx) = self
             .inner
             .lock()
             .await
@@ -131,6 +134,17 @@ impl PendingMigrations {
     #[allow(dead_code)]
     pub async fn cancel(&self, id: &str) {
         let _ = self.inner.lock().await.remove(id);
+    }
+
+    /// Drop every migration request raised by `agent_id`, unblocking the
+    /// parked tasks with a recv error. Called on agent disconnect so an
+    /// agent's in-flight migration prompt doesn't hang after it's gone.
+    /// Returns the number cancelled.
+    pub async fn cancel_agent(&self, agent_id: &str) -> usize {
+        let mut guard = self.inner.lock().await;
+        let before = guard.len();
+        guard.retain(|_, (a, _)| a.as_deref() != Some(agent_id));
+        before - guard.len()
     }
 }
 
@@ -180,17 +194,21 @@ impl PendingConnects {
 /// same pending list.
 #[derive(Default, Clone)]
 pub struct PendingPermissions {
-    inner: Arc<Mutex<HashMap<String, oneshot::Sender<PermissionVerdict>>>>,
+    inner: Arc<Mutex<HashMap<String, (Option<String>, oneshot::Sender<PermissionVerdict>)>>>,
 }
 
 impl PendingPermissions {
-    /// Register a pending request and get back its id + the receiver to
-    /// await on. Caller is responsible for emitting the activity event with
-    /// the id so the UI can reference it on resolve.
-    pub async fn register(&self) -> (String, oneshot::Receiver<PermissionVerdict>) {
+    /// Register a pending request (tagged with the raising agent, if any) and
+    /// get back its id + the receiver to await on. Caller is responsible for
+    /// emitting the activity event with the id so the UI can reference it on
+    /// resolve.
+    pub async fn register(
+        &self,
+        agent_id: Option<String>,
+    ) -> (String, oneshot::Receiver<PermissionVerdict>) {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        self.inner.lock().await.insert(id.clone(), tx);
+        self.inner.lock().await.insert(id.clone(), (agent_id, tx));
         (id, rx)
     }
 
@@ -198,7 +216,7 @@ impl PendingPermissions {
     /// is unknown (already resolved or never existed) or if the requester
     /// dropped its receiver before we could send.
     pub async fn resolve(&self, id: &str, verdict: PermissionVerdict) -> Result<(), String> {
-        let tx = self
+        let (_agent, tx) = self
             .inner
             .lock()
             .await
@@ -216,6 +234,17 @@ impl PendingPermissions {
         let _ = self.inner.lock().await.remove(id);
     }
 
+    /// Drop every request raised by `agent_id`, unblocking the parked tasks
+    /// with a recv error. Called on agent disconnect so an agent's in-flight
+    /// permission prompts don't hang forever once it's gone. Returns the
+    /// number cancelled.
+    pub async fn cancel_agent(&self, agent_id: &str) -> usize {
+        let mut guard = self.inner.lock().await;
+        let before = guard.len();
+        guard.retain(|_, (a, _)| a.as_deref() != Some(agent_id));
+        before - guard.len()
+    }
+
     /// How many requests are currently outstanding. Useful for the status
     /// bar's "N pending" indicator in Phase 3+; cheap so we expose it now.
     #[allow(dead_code)]
@@ -231,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn register_then_resolve_delivers_verdict() {
         let pending = PendingPermissions::default();
-        let (id, rx) = pending.register().await;
+        let (id, rx) = pending.register(None).await;
         let p2 = pending.clone();
         let id2 = id.clone();
         tokio::spawn(async move {
@@ -246,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_modified_carries_sql() {
         let pending = PendingPermissions::default();
-        let (id, rx) = pending.register().await;
+        let (id, rx) = pending.register(None).await;
         pending
             .resolve(
                 &id,
@@ -275,7 +304,7 @@ mod tests {
     #[tokio::test]
     async fn double_resolve_errors() {
         let pending = PendingPermissions::default();
-        let (id, _rx) = pending.register().await;
+        let (id, _rx) = pending.register(None).await;
         pending
             .resolve(&id, PermissionVerdict::Allow)
             .await
@@ -289,7 +318,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_removes_request() {
         let pending = PendingPermissions::default();
-        let (id, _rx) = pending.register().await;
+        let (id, _rx) = pending.register(None).await;
         assert_eq!(pending.len().await, 1);
         pending.cancel(&id).await;
         assert_eq!(pending.len().await, 0);
@@ -298,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn deny_dropped_receiver_errors_on_send() {
         let pending = PendingPermissions::default();
-        let (id, rx) = pending.register().await;
+        let (id, rx) = pending.register(None).await;
         drop(rx);
         let err = pending
             .resolve(&id, PermissionVerdict::Allow)
@@ -310,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn migration_register_resolve() {
         let pending = PendingMigrations::default();
-        let (id, rx) = pending.register().await;
+        let (id, rx) = pending.register(None).await;
         let p2 = pending.clone();
         let id2 = id.clone();
         tokio::spawn(async move {
@@ -339,5 +368,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn cancel_agent_drops_only_that_agents_requests() {
+        let pending = PendingPermissions::default();
+        let (_a, rx_a) = pending.register(Some("agent-1".into())).await;
+        let (_b, rx_b) = pending.register(Some("agent-2".into())).await;
+        let (_c, rx_c) = pending.register(None).await;
+        assert_eq!(pending.len().await, 3);
+
+        let n = pending.cancel_agent("agent-1").await;
+        assert_eq!(n, 1, "only agent-1's request is cancelled");
+        assert_eq!(pending.len().await, 2, "agent-2's and the UI's remain");
+
+        // The cancelled request's parked receiver unblocks with a recv error.
+        assert!(rx_a.await.is_err());
+        // The survivors are still pending — keep their receivers alive.
+        drop((rx_b, rx_c));
+    }
+
+    #[tokio::test]
+    async fn migration_cancel_agent_drops_only_that_agents_requests() {
+        let pending = PendingMigrations::default();
+        let (_a, rx_a) = pending.register(Some("agent-1".into())).await;
+        let (_b, rx_b) = pending.register(Some("agent-2".into())).await;
+
+        let n = pending.cancel_agent("agent-1").await;
+        assert_eq!(n, 1);
+        assert!(rx_a.await.is_err());
+        drop(rx_b);
     }
 }

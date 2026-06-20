@@ -94,7 +94,7 @@ async fn run_with_gate(
             return Err(anyhow!("blocked by policy '{rule}': {reason}"));
         }
         Verdict::Prompt { rule, reason } => {
-            let (id, rx) = core.pending_permissions.register().await;
+            let (id, rx) = core.pending_permissions.register(core.agent_id.clone()).await;
             let request = PermissionRequest {
                 id: id.clone(),
                 source: core.source.clone(),
@@ -286,7 +286,7 @@ async fn run_migration_with_gate(
     let any_blocked = classified.iter().any(|s| s.verdict == "block");
 
     // Register the bulk verdict slot, emit the plan, await.
-    let (id, rx) = core.pending_migrations.register().await;
+    let (id, rx) = core.pending_migrations.register(core.agent_id.clone()).await;
     let request = MigrationRequest {
         id: id.clone(),
         source: core.source.clone(),
@@ -334,7 +334,7 @@ async fn run_migration_with_gate(
         let final_sql: String = if stmt_verdict.verdict == "allow" {
             original_sql.clone()
         } else {
-            let (rid, rx) = core.pending_permissions.register().await;
+            let (rid, rx) = core.pending_permissions.register(core.agent_id.clone()).await;
             let req = PermissionRequest {
                 id: rid.clone(),
                 source: core.source.clone(),

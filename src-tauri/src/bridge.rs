@@ -423,6 +423,14 @@ async fn handle_conn(stream: UnixStream, agent_core: Core, registry: AgentRegist
 
     registry.remove(&agent_id).await;
     emit_presence(&app, &registry).await;
+    // Unblock anything the agent left parked on a human verdict — without this
+    // the awaiting task (and its UI card) hangs forever now that the agent is
+    // gone. See core::permission::Pending*::cancel_agent.
+    let cancelled = conn_core.pending_permissions.cancel_agent(&agent_id).await
+        + conn_core.pending_migrations.cancel_agent(&agent_id).await;
+    if cancelled > 0 {
+        tracing::info!(agent_id = %agent_id, cancelled, "cancelled parked requests on disconnect");
+    }
     tracing::info!(agent_id = %agent_id, "agent disconnected");
 }
 
