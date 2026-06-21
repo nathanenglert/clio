@@ -404,6 +404,13 @@ const SAVE_QUERY_AS_MENU_ID: &str = "file.save_query_as";
 const SAVE_QUERY_EVENT: &str = "save-query";
 const SAVE_QUERY_AS_EVENT: &str = "save-query-as";
 
+/// App menu "Check for Updates…" item. Emits `check-for-updates`, which the
+/// frontend's updater hook handles as a manual (user-initiated) check — the
+/// same check it runs silently on launch, but with a "you're up to date"
+/// confirmation toast when nothing is found.
+const CHECK_UPDATES_MENU_ID: &str = "app.check_updates";
+const CHECK_UPDATES_EVENT: &str = "check-for-updates";
+
 /// Recursively search the app's menu tree for a CheckMenuItem with `id`.
 /// `Menu::get` only checks the top level; submenus need a manual walk.
 fn find_check_item<R: Runtime>(
@@ -454,12 +461,25 @@ fn build_app_menu<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R
         ..Default::default()
     };
 
+    // "Check for Updates…" sits right under About in the app menu, the
+    // conventional macOS home for it. No accelerator (it's a rare, deliberate
+    // action). The frontend's command palette exposes the same check.
+    let check_updates_item = MenuItem::with_id(
+        app,
+        CHECK_UPDATES_MENU_ID,
+        "Check for Updates…",
+        true,
+        None::<&str>,
+    )?;
+
     let app_menu = Submenu::with_items(
         app,
         pkg.name.clone(),
         true,
         &[
             &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &check_updates_item,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -565,7 +585,13 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        // In-app updater (UI mode only — run_mcp has no window and must never
+        // self-update). Verifies the minisign signature against the pubkey
+        // pinned in tauri.conf.json before installing. plugin-process supplies
+        // the relaunch() the "Restart to update" action calls.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
 
     #[cfg(debug_assertions)]
     {
@@ -588,6 +614,8 @@ pub fn run() {
                 let _ = app.emit(SAVE_QUERY_EVENT, ());
             } else if id == SAVE_QUERY_AS_MENU_ID {
                 let _ = app.emit(SAVE_QUERY_AS_EVENT, ());
+            } else if id == CHECK_UPDATES_MENU_ID {
+                let _ = app.emit(CHECK_UPDATES_EVENT, ());
             }
         })
         .setup(|app| {
