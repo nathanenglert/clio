@@ -38,6 +38,8 @@
   /* ── User identity (cool, calm) ───────────────────────────────── */
   --user:           #8aa6b3;   /* used sparingly — the human is the default */
   --user-soft:      #4a6470;
+  --user-wash:      rgba(138, 166, 179, 0.12); /* chip/badge fill (e.g. update chip) */
+  --user-line:      rgba(138, 166, 179, 0.32); /* chip/badge border */
 
   /* ── Op semantics ─────────────────────────────────────────────── */
   --op-read:        #7fa886;   /* SELECT, read-only */

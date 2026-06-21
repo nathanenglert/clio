@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 // Tiny module-scoped pub/sub — toasts can be raised from anywhere (menu
 // handlers, top-level shortcuts) without threading callbacks through props.
 
-type ToastTone = "ok" | "err" | "info";
+type ToastTone = "ok" | "err" | "info" | "update";
 type ToastAction = { label: string; onClick: () => void };
 type ToastEvent = {
   id: number;
