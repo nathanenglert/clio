@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import {
   api,
   onActivity,
@@ -22,6 +22,7 @@ import { PermissionCard } from "./components/PermissionCard";
 import { BulkMigrationCard } from "./components/BulkMigrationCard";
 import { ConnectCard } from "./components/ConnectCard";
 import { PolicyModal } from "./components/PolicyModal";
+import { UpdateIndicator } from "./components/UpdateIndicator";
 import { ShortcutsOverlay } from "./components/ShortcutsOverlay";
 import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
@@ -395,6 +396,14 @@ export function App() {
         kbd: "⌘⌥R",
         onSelect: () => {
           void invoke("set_reveal_sensitive", { on: !reveal });
+        },
+      },
+      {
+        id: "check-updates",
+        title: "Check for updates…",
+        subtitle: "Look for a newer Clio on GitHub",
+        onSelect: () => {
+          void emit("check-for-updates");
         },
       },
       {
@@ -847,6 +856,7 @@ export function App() {
           <span>policy: default</span>
         </button>
         <span className="status-build">
+          <UpdateIndicator autoCheck={!!build && !build.is_dev} />
           {build?.is_dev && (
             <span
               className="dev-pill"
