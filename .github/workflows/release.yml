@@ -79,6 +79,12 @@ jobs:
           # build is still quarantined — clear it once on first launch:
           #   xattr -dr com.apple.quarantine /Applications/Clio.app
           APPLE_SIGNING_IDENTITY: "-"
+          # Updater signing (minisign) — independent of Apple codesigning. The
+          # public key is pinned in tauri.conf.json (plugins.updater.pubkey);
+          # these sign the .app.tar.gz so the in-app updater trusts it. Losing
+          # this private key means no future build can be served as an update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # release-please already created the (draft) release; match its tag
           # and draft status so tauri-action uploads to it instead of making a
@@ -87,4 +93,9 @@ jobs:
           releaseName: Clio ${{ needs.release-please.outputs.tag_name }}
           releaseDraft: true
           prerelease: false
+          # Generate + upload latest.json (the updater manifest) alongside the
+          # signed bundle. The in-app updater fetches it from the
+          # plugins.updater endpoint — but only after you publish the draft, so
+          # the manual publish stays the "ship this update to users" gate.
+          includeUpdaterJson: true
           args: --target aarch64-apple-darwin
