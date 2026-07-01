@@ -12,7 +12,7 @@
 //! so the result-row pass at query time is a hot O(N rows × N cols) lookup
 //! with no SQLite or Postgres I/O.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -34,6 +34,12 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone)]
 pub struct RedactorView {
     pub by_oid: Arc<HashMap<(i32, i16), ClassifiedColumn>>,
+    /// Classified columns keyed by lowercased table name → set of lowercased
+    /// column names. Unlike `by_oid` (which needs a live Postgres OID), this is
+    /// built directly from the stored classifications, so it exists even for
+    /// columns whose OID didn't resolve. Drives `core::lineage`'s analysis of
+    /// derived/expression result columns that Postgres doesn't tag.
+    pub by_name: Arc<HashMap<String, HashSet<String>>>,
     pub secret: Arc<[u8; 32]>,
 }
 
@@ -66,13 +72,16 @@ impl RedactorCache {
         {
             let guard = self.inner.lock().await;
             if let Some(v) = guard.get(conn_name) {
-                return Ok(if v.by_oid.is_empty() { None } else { Some(v.clone()) });
+                return Ok(if v.by_name.is_empty() { None } else { Some(v.clone()) });
             }
         }
         let view = build_view(meta, pool, conn_name, connection_id).await?;
         let arc = Arc::new(view);
         self.inner.lock().await.insert(conn_name.to_string(), arc.clone());
-        Ok(if arc.by_oid.is_empty() { None } else { Some(arc) })
+        // Presence of *any* classification (not just OID-resolved ones) means
+        // the connection is redacted: `by_name` powers the lineage pass even
+        // when a classified column's OID didn't resolve.
+        Ok(if arc.by_name.is_empty() { None } else { Some(arc) })
     }
 }
 
@@ -92,8 +101,19 @@ async fn build_view(
     if classifications.is_empty() {
         return Ok(RedactorView {
             by_oid: Arc::new(HashMap::new()),
+            by_name: Arc::new(HashMap::new()),
             secret: Arc::new(secret),
         });
+    }
+
+    // Name-keyed view for lineage analysis, built straight from the stored
+    // classifications (independent of OID resolution below).
+    let mut by_name: HashMap<String, HashSet<String>> = HashMap::new();
+    for c in &classifications {
+        by_name
+            .entry(c.table.to_ascii_lowercase())
+            .or_default()
+            .insert(c.column.to_ascii_lowercase());
     }
 
     // Group classifications by (schema, table) for the OID resolution query.
@@ -168,6 +188,7 @@ async fn build_view(
 
     Ok(RedactorView {
         by_oid: Arc::new(by_oid),
+        by_name: Arc::new(by_name),
         secret: Arc::new(secret),
     })
 }

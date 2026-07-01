@@ -71,8 +71,10 @@ schemars = "1"
 
 # SQL parser for the permission-gate policy evaluator. AST-level extraction
 # of op kind + targets so we can distinguish DROP TABLE from DROP SCHEMA and
-# handle CTE writes correctly.
-sqlparser = "0.62"
+# handle CTE writes correctly. The `visitor` feature drives redaction lineage
+# analysis (core::lineage) — walking projection expressions to spot references
+# to classified columns that Postgres doesn't tag with a source column.
+sqlparser = { version = "0.62", features = ["visitor"] }
 
 [profile.release]
 opt-level = 3

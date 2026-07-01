@@ -8,6 +8,7 @@ use crate::pool::{PoolAccess, PoolRegistry};
 mod execute;
 mod export;
 mod lifecycle;
+mod lineage;
 mod mutations;
 pub(crate) mod permission;
 pub(crate) mod policy;

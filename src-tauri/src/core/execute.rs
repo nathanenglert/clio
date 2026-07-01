@@ -24,7 +24,7 @@ use super::permission::{
     MigrationRequest, MigrationStatement, MigrationVerdict, PermissionRequest, PermissionVerdict,
 };
 use super::policy::{self, OpKind, StmtInfo, StmtKind, Verdict};
-use super::query::{cap_payload, run_decoded};
+use super::query::{cap_payload, run_decoded, sanitize_db_error};
 use super::Core;
 
 pub async fn execute_statement(
@@ -369,6 +369,18 @@ async fn run_migration_with_gate(
         final_sqls.push(final_sql);
     }
 
+    // Whether this connection redacts — governs error-message sanitization for
+    // the statements about to run. A failed write can echo real classified
+    // values in its DB error (e.g. a unique-violation `Key (email)=(real@x.com)
+    // already exists`); on the agent path that must not cross the bridge.
+    let classified = {
+        let connection = crate::connections::get(&core.meta, conn).await?;
+        core.redactor_cache
+            .view_for(&core.meta, &pool, conn, &connection.id)
+            .await?
+            .is_some()
+    };
+
     // ── Phase B: the plan is fully approved — now run it. Only here do we
     // (optionally) BEGIN, so locks live only for the duration of execution.
     let mut tx_opt = if wrap_in_tx {
@@ -383,20 +395,13 @@ async fn run_migration_with_gate(
         // lookup, no pool round-trip — since redaction applies to query
         // *output*, and migrations rarely return rows.
         let exec_started = Instant::now();
-        match tx_opt.as_mut() {
-            Some(tx) => {
-                sqlx::query(final_sql)
-                    .execute(&mut **tx)
-                    .await
-                    .with_context(|| format!("stmt {idx} failed"))?;
-            }
-            None => {
-                sqlx::query(final_sql)
-                    .execute(&pool)
-                    .await
-                    .with_context(|| format!("stmt {idx} failed"))?;
-            }
-        }
+        let run = match tx_opt.as_mut() {
+            Some(tx) => sqlx::query(final_sql).execute(&mut **tx).await,
+            None => sqlx::query(final_sql).execute(&pool).await,
+        };
+        run.map(|_| ())
+            .map_err(|e| sanitize_db_error(core, classified, e))
+            .with_context(|| format!("stmt {idx} failed"))?;
         results.push(QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -479,7 +484,7 @@ mod tests {
     use crate::core::policy;
     use crate::core::Core;
     use crate::pool::PoolRegistry;
-    use crate::types::{ActivityEvent, NewConnectionInput};
+    use crate::types::{ActivityEvent, Category, ClassificationStatus, NewConnectionInput};
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
     use std::sync::Arc;
@@ -827,5 +832,113 @@ mod tests {
         let err = r.expect_err("a modified-into-DROP deviation must be refused");
         assert!(err.to_string().contains("blocked"), "expected a block error, got: {err}");
         assert!(victim, "the edited DROP must not have run");
+    }
+
+    // ── R2: redaction of derived result columns + error channel ──────────
+    //
+    // The agent read path (execute_statement's Allow-read branch → run_decoded)
+    // must not leak a classified value by wrapping the column in an expression,
+    // and a DB error must not echo it. See core::lineage + query::sanitize_db_error.
+
+    /// Classify `<schema>.patients.ssn` and seed one row. Returns the real ssn.
+    async fn setup_classified_patients(h: &Harness) -> String {
+        let ssn = "111-22-3333";
+        sqlx::query(&format!("CREATE TABLE {}.patients (id int, ssn text)", h.schema))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        sqlx::query(&format!("INSERT INTO {}.patients (id, ssn) VALUES (1, $1)", h.schema))
+            .bind(ssn)
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        let conn_id = connections::get(&h.core.meta, TEST_CONN).await.unwrap().id;
+        connections::insert_classification(
+            &h.core.meta,
+            &conn_id,
+            &h.schema,
+            "patients",
+            "ssn",
+            Category::Pii,
+            ClassificationStatus::Confirmed,
+            "test",
+        )
+        .await
+        .unwrap();
+        h.core.redactor_cache.invalidate(TEST_CONN).await;
+        ssn.to_string()
+    }
+
+    #[tokio::test]
+    async fn derived_expression_column_is_redacted_but_bare_is_faked() {
+        let Some(h) = setup().await else { return };
+        let real = setup_classified_patients(&h).await;
+
+        // Bare classified column → deterministic fake (not the real value, not
+        // the derived marker).
+        let bare = execute_statement(
+            &h.core,
+            TEST_CONN,
+            &format!("SELECT ssn FROM {}.patients", h.schema),
+            None,
+        )
+        .await
+        .expect("bare select runs");
+        let v = bare.rows[0][0].as_deref().unwrap();
+        assert_ne!(v, real, "bare classified column must be faked");
+        assert_ne!(v, "<redacted>", "bare column gets a type-preserving fake, not the marker");
+        assert!(bare.columns[0].redacted, "bare classified column is marked redacted");
+
+        // Expression over the classified column → the bypass; must be redacted.
+        let derived = execute_statement(
+            &h.core,
+            TEST_CONN,
+            &format!("SELECT ssn || '' AS x FROM {}.patients", h.schema),
+            None,
+        )
+        .await
+        .expect("derived select runs");
+        let dv = derived.rows[0][0].as_deref().unwrap();
+        assert_eq!(dv, "<redacted>", "expression over classified column must be redacted; got {dv}");
+        assert!(!dv.contains(real.as_str()), "the real ssn must never appear");
+        assert!(derived.redaction_meta.is_some(), "agent must be told data was redacted");
+
+        // Non-sensitive aggregate over the same table stays visible.
+        let agg = execute_statement(
+            &h.core,
+            TEST_CONN,
+            &format!("SELECT count(*) AS n FROM {}.patients", h.schema),
+            None,
+        )
+        .await
+        .expect("count runs");
+        assert_eq!(agg.rows[0][0].as_deref(), Some("1"), "count(*) must not be redacted");
+
+        h.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn db_error_does_not_echo_classified_value() {
+        let Some(h) = setup().await else { return };
+        let real = setup_classified_patients(&h).await;
+
+        // `ssn::int` fails with `invalid input syntax for type integer:
+        // "111-22-3333"`. On the agent path + classified connection that
+        // message must be withheld before it reaches the agent.
+        let err = execute_statement(
+            &h.core,
+            TEST_CONN,
+            &format!("SELECT ssn::int FROM {}.patients", h.schema),
+            None,
+        )
+        .await
+        .expect_err("cast fails");
+        let msg = format!("{err:#}");
+        h.drop_schema().await;
+        assert!(!msg.contains(real.as_str()), "DB error must not echo the real ssn; got: {msg}");
+        assert!(
+            msg.contains("withheld") || msg.contains("redaction"),
+            "expected a sanitized error, got: {msg}"
+        );
     }
 }
