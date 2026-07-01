@@ -10,9 +10,9 @@ use std::time::Instant;
 use crate::connections;
 use crate::types::ExportResult;
 
-use super::query::decode_cell;
+use super::query::{decode_cell, DERIVED_REDACTED};
 use super::redactor::{fake_for, RedactorView};
-use super::Core;
+use super::{lineage, Core};
 
 /// Internal: per-export redactor lookup keyed by **result-column index**.
 /// Built once before streaming. `None` entries mean "leave alone".
@@ -50,6 +50,13 @@ pub async fn export_query(
                 .view_for(&core.meta, &pool, conn, &connection.id)
                 .await?
         };
+        // Same lineage decision as run_decoded: should untagged (derived)
+        // columns be redacted? Postgres doesn't tag expression columns, so the
+        // per-column `redactors` map below can't catch them.
+        let redact_derived = match &redactor_view {
+            Some(view) => lineage::should_redact_derived(sql, view),
+            None => false,
+        };
 
         let file = File::create(Path::new(path))
             .with_context(|| format!("create file {}", path))?;
@@ -59,6 +66,9 @@ pub async fn export_query(
         let mut row_count: usize = 0;
         let mut columns: Vec<(String, String)> = Vec::new();
         let mut redactors: Vec<Option<ColRedactor>> = Vec::new();
+        // Parallel to `columns`: true where the column is a derived/expression
+        // result column that must be redacted wholesale (see run_decoded).
+        let mut derived: Vec<bool> = Vec::new();
 
         if format == "csv" {
             // UTF-8 BOM so Excel reads non-ASCII correctly.
@@ -92,19 +102,29 @@ pub async fn export_query(
                         })
                     })
                     .collect();
+                derived = row
+                    .columns()
+                    .iter()
+                    .map(|c| {
+                        redactor_view.is_some()
+                            && redact_derived
+                            && !(c.relation_id().is_some()
+                                && c.relation_attribute_no().is_some())
+                    })
+                    .collect();
                 if format == "csv" {
                     write_csv_header(&mut w, &columns)?;
                 }
             }
             let secret = redactor_view.as_ref().map(|v| v.secret.clone());
             match format {
-                "csv" => write_csv_row(&mut w, &row, &columns, &redactors, secret.as_ref())?,
+                "csv" => write_csv_row(&mut w, &row, &columns, &redactors, &derived, secret.as_ref())?,
                 "json" => {
                     if !first_row {
                         w.write_all(b",")?;
                     }
                     w.write_all(b"\n  ")?;
-                    write_json_row(&mut w, &row, &columns, &redactors, secret.as_ref())?;
+                    write_json_row(&mut w, &row, &columns, &redactors, &derived, secret.as_ref())?;
                 }
                 _ => unreachable!(),
             }
@@ -171,6 +191,7 @@ fn write_csv_row<W: Write>(
     row: &sqlx::postgres::PgRow,
     columns: &[(String, String)],
     redactors: &[Option<ColRedactor>],
+    derived: &[bool],
     secret: Option<&Arc<[u8; 32]>>,
 ) -> std::io::Result<()> {
     for i in 0..columns.len() {
@@ -178,16 +199,20 @@ fn write_csv_row<W: Write>(
             w.write_all(b",")?;
         }
         if let Some(s) = decode_cell(row, i) {
-            let cooked = match (redactors.get(i).and_then(|r| r.as_ref()), secret) {
-                (Some(r), Some(secret)) => fake_for(
-                    secret.as_ref(),
-                    r.table_oid,
-                    r.attnum,
-                    &r.column_name,
-                    &r.pg_type,
-                    &s,
-                ),
-                _ => s,
+            let cooked = if derived.get(i).copied().unwrap_or(false) {
+                DERIVED_REDACTED.to_string()
+            } else {
+                match (redactors.get(i).and_then(|r| r.as_ref()), secret) {
+                    (Some(r), Some(secret)) => fake_for(
+                        secret.as_ref(),
+                        r.table_oid,
+                        r.attnum,
+                        &r.column_name,
+                        &r.pg_type,
+                        &s,
+                    ),
+                    _ => s,
+                }
             };
             write_csv_field(w, &cooked)?;
         }
@@ -219,6 +244,7 @@ fn write_json_row<W: Write>(
     row: &sqlx::postgres::PgRow,
     columns: &[(String, String)],
     redactors: &[Option<ColRedactor>],
+    derived: &[bool],
     secret: Option<&Arc<[u8; 32]>>,
 ) -> std::io::Result<()> {
     w.write_all(b"{")?;
@@ -230,6 +256,16 @@ fn write_json_row<W: Write>(
             .unwrap_or_else(|_| format!("\"{}\"", name.replace('"', "\\\"")));
         w.write_all(key.as_bytes())?;
         w.write_all(b": ")?;
+        // Derived/expression columns are redacted wholesale (unless NULL).
+        if derived.get(i).copied().unwrap_or(false) {
+            let value = match decode_cell(row, i) {
+                None => serde_json::Value::Null,
+                Some(_) => serde_json::Value::String(DERIVED_REDACTED.to_string()),
+            };
+            let value_s = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
+            w.write_all(value_s.as_bytes())?;
+            continue;
+        }
         let value = match (redactors.get(i).and_then(|r| r.as_ref()), secret) {
             (Some(r), Some(secret)) => {
                 // Redacted cells serialize as a JSON string of the fake — same

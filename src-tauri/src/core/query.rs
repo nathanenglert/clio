@@ -1,10 +1,11 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::time::Instant;
 
 use crate::connections;
 use crate::types::{ColumnMeta, QueryResult, RedactionMeta};
 
+use super::lineage;
 use super::redactor::{fake_for, RedactorView};
 use super::Core;
 
@@ -13,6 +14,10 @@ const ROW_CAP: usize = 1000;
 /// Cap full-text payloads (e.g. SQL) emitted on activity events.
 const PAYLOAD_MAX_BYTES: usize = 4096;
 
+/// Replacement value for a derived/expression result column whose lineage
+/// touches a classified column. Matches the redactor's opaque-type marker.
+pub(super) const DERIVED_REDACTED: &str = "<redacted>";
+
 /// Per-result-column redaction target. Built from sqlx's per-column
 /// `relation_id` + `relation_attribute_no` joined against the redactor view.
 struct RedactionTarget {
@@ -20,6 +25,17 @@ struct RedactionTarget {
     attnum: i16,
     column_name: String,
     pg_type: String,
+}
+
+/// How a single result column's cells are transformed before leaving the core.
+enum ColPlan {
+    /// OID-tagged classified column → deterministic type-preserving faker.
+    Fake(RedactionTarget),
+    /// Derived/expression column whose lineage touches a classified column →
+    /// replaced wholesale (Postgres reports no source column to key a faker on).
+    Derived,
+    /// Real value passes through unchanged.
+    Pass,
 }
 
 pub(super) fn cap_payload(s: &str) -> String {
@@ -190,52 +206,75 @@ pub(super) async fn run_decoded(
             .await?
     };
 
-    let rows = sqlx::query(sql)
-        .fetch_all(&pool)
-        .await
-        .with_context(|| "query failed")?;
+    let classified = redactor_view.is_some();
+    // Should result columns Postgres left *untagged* (derived expressions over
+    // classified columns) be redacted? Only meaningful on a classified
+    // connection; see core::lineage.
+    let redact_derived = match &redactor_view {
+        Some(view) => lineage::should_redact_derived(sql, view),
+        None => false,
+    };
 
-    // Build per-column meta (name, type) and figure out which result
-    // columns map to classified base columns.
-    let (columns, redacted_column_lookup): (Vec<ColumnMeta>, Vec<Option<RedactionTarget>>) =
-        if let Some(first) = rows.first() {
-            let pg_cols = first.columns();
-            let mut metas = Vec::with_capacity(pg_cols.len());
-            let mut lookup = Vec::with_capacity(pg_cols.len());
-            for c in pg_cols.iter() {
-                let pg_type = c.type_info().name().to_string();
-                let mut redacted = false;
-                let mut category = None;
-                let mut target = None;
-                if let Some(view) = &redactor_view {
-                    if let (Some(oid), Some(attnum)) =
-                        (c.relation_id(), c.relation_attribute_no())
-                    {
-                        let key = (oid.0 as i32, attnum);
-                        if let Some(cc) = view.by_oid.get(&key) {
+    let rows = match sqlx::query(sql).fetch_all(&pool).await {
+        Ok(r) => r,
+        Err(e) => return Err(sanitize_db_error(core, classified, e)),
+    };
+
+    // Build per-column meta and a redaction plan. Three cases per column:
+    //  • OID-tagged + classified     → deterministic faker (bare column ref)
+    //  • untagged + `redact_derived` → wholesale marker (expression lineage)
+    //  • otherwise                   → pass the real value through
+    let (columns, plans): (Vec<ColumnMeta>, Vec<ColPlan>) = if let Some(first) = rows.first() {
+        let pg_cols = first.columns();
+        let mut metas = Vec::with_capacity(pg_cols.len());
+        let mut plans = Vec::with_capacity(pg_cols.len());
+        for c in pg_cols.iter() {
+            let pg_type = c.type_info().name().to_string();
+            let mut redacted = false;
+            let mut category = None;
+            let plan = match &redactor_view {
+                None => ColPlan::Pass,
+                Some(view) => {
+                    let tagged = match (c.relation_id(), c.relation_attribute_no()) {
+                        (Some(oid), Some(attnum)) => Some((oid.0 as i32, attnum)),
+                        _ => None,
+                    };
+                    match tagged {
+                        Some(key) => match view.by_oid.get(&key) {
+                            Some(cc) => {
+                                redacted = true;
+                                category = Some(cc.category);
+                                ColPlan::Fake(RedactionTarget {
+                                    table_oid: key.0,
+                                    attnum: key.1,
+                                    column_name: cc.column_name.clone(),
+                                    pg_type: pg_type.clone(),
+                                })
+                            }
+                            // Tagged real column that isn't classified — leave it.
+                            None => ColPlan::Pass,
+                        },
+                        // Untagged (derived/expression) column.
+                        None if redact_derived => {
                             redacted = true;
-                            category = Some(cc.category);
-                            target = Some(RedactionTarget {
-                                table_oid: key.0,
-                                attnum: key.1,
-                                column_name: cc.column_name.clone(),
-                                pg_type: pg_type.clone(),
-                            });
+                            ColPlan::Derived
                         }
+                        None => ColPlan::Pass,
                     }
                 }
-                metas.push(ColumnMeta {
-                    name: c.name().to_string(),
-                    data_type: pg_type.to_ascii_lowercase(),
-                    redacted,
-                    category,
-                });
-                lookup.push(target);
-            }
-            (metas, lookup)
-        } else {
-            (Vec::new(), Vec::new())
-        };
+            };
+            metas.push(ColumnMeta {
+                name: c.name().to_string(),
+                data_type: pg_type.to_ascii_lowercase(),
+                redacted,
+                category,
+            });
+            plans.push(plan);
+        }
+        (metas, plans)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let truncated = rows.len() > ROW_CAP;
     let take = rows.len().min(ROW_CAP);
@@ -246,16 +285,22 @@ pub(super) async fn run_decoded(
         let mut out_row = Vec::with_capacity(row.columns().len());
         for (i, _col) in row.columns().iter().enumerate() {
             let raw = decode_cell(row, i);
-            let cooked = match (&raw, &redacted_column_lookup[i], &secret_ref) {
-                (Some(real), Some(target), Some(secret)) => Some(fake_for(
-                    secret.as_ref(),
-                    target.table_oid,
-                    target.attnum,
-                    &target.column_name,
-                    &target.pg_type,
-                    real,
-                )),
-                _ => raw,
+            let cooked = match &plans[i] {
+                ColPlan::Fake(target) => match (&raw, &secret_ref) {
+                    (Some(real), Some(secret)) => Some(fake_for(
+                        secret.as_ref(),
+                        target.table_oid,
+                        target.attnum,
+                        &target.column_name,
+                        &target.pg_type,
+                        real,
+                    )),
+                    _ => raw,
+                },
+                // Derived-from-classified: replace wholesale. NULLs stay NULL —
+                // they carry no value to leak.
+                ColPlan::Derived => raw.as_ref().map(|_| DERIVED_REDACTED.to_string()),
+                ColPlan::Pass => raw,
             };
             out_row.push(cooked);
         }
@@ -290,6 +335,26 @@ pub(super) async fn run_decoded(
     })
 }
 
+
+/// Convert a query execution error for return to the caller. On the **agent
+/// path** and a **classified connection**, a Postgres `DatabaseError` is
+/// replaced with a generic message: its text can echo real classified values
+/// (`invalid input syntax for type integer: "111-22-3333"`, or a unique-
+/// violation `Key (email)=(real@x.com) already exists`), bypassing the row
+/// redactor through the error channel. The human (UI) path and unclassified
+/// connections keep the full error — the human is trusted and needs it to
+/// debug, and there is nothing sensitive to leak.
+pub(super) fn sanitize_db_error(core: &Core, classified: bool, e: sqlx::Error) -> anyhow::Error {
+    let is_agent = matches!(core.pool_access, crate::pool::PoolAccess::Agent);
+    if is_agent && classified && matches!(e, sqlx::Error::Database(_)) {
+        anyhow!(
+            "the database rejected this query; its error detail was withheld because this \
+             connection has redaction enabled and the message may contain sensitive column values"
+        )
+    } else {
+        anyhow::Error::new(e).context("query failed")
+    }
+}
 
 /// Best-effort decode of a single Postgres cell to a display String.
 /// Falls back to the type name in angle brackets for types we don't know.
