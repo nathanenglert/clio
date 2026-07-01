@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/nathanenglert/clio/compare/v0.2.0...v0.2.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* **redaction:** close agent PII read channels — expression lineage + error sanitization ([#36](https://github.com/nathanenglert/clio/issues/36)) ([36b40d8](https://github.com/nathanenglert/clio/commit/36b40d86e2781aa68dc8d6fcc2fbcab45feef1d2))
+
 ## [0.2.0](https://github.com/nathanenglert/clio/compare/v0.1.1...v0.2.0) (2026-06-21)
 
 
