@@ -61,7 +61,7 @@ hmac = "0.12"
 sha2 = "0.10"
 rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 
-rmcp = { version = "1.7", features = [
+rmcp = { version = "2.1", features = [
     "server",
     "macros",
     "transport-io",
