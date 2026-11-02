@@ -2,18 +2,30 @@
 
 ## Now
 
-> **Live PII leak test — 2026-11-02 (quick wins).** Drove the dev build with `tauri-pilot` and
-> attacked a seeded copy of the workbench DB over MCP as the agent. Bare columns, `SELECT *`, and
-> the #36 expression/error fixes held. 12 leak paths were confirmed, each returning real values that
-> matched ground truth from psql. The items below are the quick wins. **They do not close** WHERE/JOIN
-> laundering (e.g. `JOIN generate_series(...) ON ascii(substr(p.ssn,pos,1)) = c.i` rebuilds every SSN in
-> one query; `lineage.rs`'s own `where_clause_reference_does_not_redact_output` test allows this),
-> `pg_stat_activity.query` exposing the human's editor queries, or classifier misses on unmatched
-> names (`billing.unpaid_balances.patient`, `appointments.notes`, `lab_results`). Closing those needs
-> Postgres itself to enforce it: an agent-only role with column-level `REVOKE SELECT` on classified
-> columns. That is not logged yet.
+> **Live PII leak test — 2026-11-02.** Drove the dev build with `tauri-pilot` and attacked a
+> seeded copy of the workbench DB over MCP as the agent. Bare columns, `SELECT *`, and the #36
+> expression/error fixes held. 12 leak paths were confirmed, each returning real values that matched
+> ground truth from psql. The quick wins it found are fixed in #41 (see Done). **Still open, not yet
+> logged as tasks:**
+> - WHERE/JOIN laundering, e.g. `JOIN generate_series(...) ON ascii(substr(p.ssn,pos,1)) = c.i`
+>   rebuilds every SSN in one query; `lineage.rs`'s own `where_clause_reference_does_not_redact_output`
+>   test allows this.
+> - `pg_stat_activity.query` exposes the human's editor queries, including literal values.
+> - Classifier misses on unmatched names (`billing.unpaid_balances.patient`, `appointments.notes`,
+>   `lab_results`).
+>
+> Closing those needs Postgres itself to enforce it: an agent-only role with column-level
+> `REVOKE SELECT` on classified columns.
 
-- [ ] **Security (R2 — critical):** The agent's "read-only" paths aren't read-only, so it can copy
+## Next
+
+## Later
+
+- [ ]
+
+## Done
+
+- [x] **Security (R2 — critical) — fixed in #41:** The agent's "read-only" paths aren't read-only, so it can copy
   PII into an unclassified table with no prompt. `validate_select_only` (`query.rs:58`) only checks
   that the SQL *starts with* `select`/`with`, and `run_decoded` (`query.rs:218`) runs it outside any
   read-only transaction.
@@ -29,7 +41,7 @@
       inside `BEGIN READ ONLY`. That also blocks side-effecting functions.
     - Classify `SELECT … INTO` as `CreateTable` in policy.
 
-- [ ] **Security (R2 — critical):** Writes to `public.*` are auto-allowed, so one `execute_statement`
+- [x] **Security (R2 — critical) — fixed in #41:** Writes to `public.*` are auto-allowed, so one `execute_statement`
   launders PII through `RETURNING`. The default rule "Write to public.* (≤1000 rows)"
   (`policy.rs:518`) lets INSERT/UPDATE run with no permission card.
   - Live repro: `INSERT INTO public.audit_log (action, target_kind, target_id) SELECT 'x', 'y',
@@ -41,7 +53,7 @@
     - Drop the auto-allow, or prompt whenever the write's source reads a classified table.
     - Fix the row estimate (next item) before relying on any row-bounded Allow.
 
-- [ ] **Bug (permission gate):** The row estimate for writes is always 0, so every row-bounded rule
+- [x] **Bug (permission gate) — fixed in #41:** The row estimate for writes is always 0, so every row-bounded rule
   is effectively unbounded. `estimate_rows` (`execute.rs:146`) reads `Plan Rows` from the top plan
   node. For INSERT/UPDATE/DELETE without RETURNING that node is `ModifyTable`, which always reports 0.
   - Verified: `EXPLAIN (FORMAT JSON) UPDATE public.leads SET status = status` → `ModifyTable Plan
@@ -50,7 +62,7 @@
   - **Fix direction:** read the `ModifyTable` node's child plan (`Plans[0]`) and add a test pinning
     the shape.
 
-- [ ] **Security (R2 — critical):** Human-path operations open pools without classifying, so the
+- [x] **Security (R2 — critical) — fixed in #41:** Human-path operations open pools without classifying, so the
   agent reads fully unredacted data. `Core::pool` (`core.rs:115`) calls `pools.ensure` for *any*
   human op (`describe_table`, `list_schemas`, `run_sql`, …). The classifier only runs in
   `core::connect` (`lifecycle.rs:52`).
@@ -71,7 +83,7 @@
       first open.
     - Gate `ensureMeta` on `active.connected`.
 
-- [ ] **Security (R2 — critical):** Lineage gaps let expression columns return real values.
+- [x] **Security (R2 — critical) — fixed in #41:** Lineage gaps let expression columns return real values.
   `SensitiveExprVisitor` (`lineage.rs:297`) matches classified columns by *name* and only sees
   `Expr` nodes. Two live repros returned real name/DOB/SSN/email and whole rows:
   1. **Table column-alias lists rename columns out from under it:** `SELECT x5||'' FROM
@@ -85,7 +97,7 @@
     - Treat a `QualifiedWildcard`/`Wildcard` function argument over a classified table as a
       whole-row reference.
 
-- [ ] **Security (R2 — critical):** Lineage can't see SQL executed from strings or values read from
+- [x] **Security (R2 — critical) — fixed in #41:** Lineage can't see SQL executed from strings or values read from
   stats catalogs, so both pass through raw.
   - **Live repro, SQL in a string:** `SELECT query_to_xml('select mrn, first_name, last_name, dob,
     ssn from clinical.patients', true, false, '')` returned real values. No relation appears in
@@ -110,7 +122,7 @@
 > closed). **R2 has confirmed agent-reachable bypasses** — logged below. The same-UID credential
 > read is a documented, accepted out-of-scope residual.
 
-- [ ] **Security (R2 — high):** Fail-open classifier silently disables redaction. `lifecycle.rs:52`
+- [x] **Security (R2 — high) — fixed in #41:** Fail-open classifier silently disables redaction. `lifecycle.rs:52`
   runs `classify_schema(...).await.ok()`, discarding the error *after* the pool is already opened
   (line 47). On a first-ever connect where `classify_schema` errors (info_schema scan timeout/blip,
   or `ensure_redaction_secret` keychain write failure), the connection goes live with **zero**
@@ -122,15 +134,13 @@
   persisted classifications, surface it to the human and have the agent read path refuse / fully-mask
   rather than treat empty `by_oid` as "no redaction needed."
 
-- [ ] **Bug:** Clicking a table to open a new query for it generates an unquoted table name. It shows e.g. `roi.Patient`, but it should be `roi."Patient"` so mixed-case/reserved identifiers resolve correctly.
-- [ ] **Bug:** The workbench's SQL parser doesn't support `DO` (anonymous PL/pgSQL) blocks. An agent hit this when trying to run a `DO $$ ... $$;` statement — the parser rejects it.
-- [ ] **UX:** UPDATE/INSERT (and other write statements) show "0 rows" in the result, which actually means "no rows returned" — misleading for writes. Show the affected row count instead (e.g. "3 rows updated") so the user sees how many rows the statement touched.
-- [ ] **Bug:** When scrolling the results pane, the `Read-only result` callout overlaps the result column headers, obscuring the column names. The callout should stay clear of (or scroll with) the header row so headers remain readable while scrolling.
-- [ ] **UX:** Distinguish redacted/faked result values with a distinct font style (e.g. italic or a muted/tinted color) so they read as clearly redacted. Real values have been mistaken for unredacted several times because faked values are visually indistinguishable from genuine data.
+- [x] **Bug — fixed in #41:** Clicking a table to open a new query for it generates an unquoted table name. It shows e.g. `roi.Patient`, but it should be `roi."Patient"` so mixed-case/reserved identifiers resolve correctly.
+- [x] **Bug — fixed in #41:** The workbench's SQL parser doesn't support `DO` (anonymous PL/pgSQL) blocks. An agent hit this when trying to run a `DO $$ ... $$;` statement — the parser rejects it.
+- [x] **UX — fixed in #41:** UPDATE/INSERT (and other write statements) show "0 rows" in the result, which actually means "no rows returned" — misleading for writes. Show the affected row count instead (e.g. "3 rows updated") so the user sees how many rows the statement touched.
+- [x] **Bug — fixed in #41:** When scrolling the results pane, the `Read-only result` callout overlaps the result column headers, obscuring the column names. The callout should stay clear of (or scroll with) the header row so headers remain readable while scrolling.
+- [x] **UX — fixed in #41:** Distinguish redacted/faked result values with a distinct font style (e.g. italic or a muted/tinted color) so they read as clearly redacted. Real values have been mistaken for unredacted several times because faked values are visually indistinguishable from genuine data.
 
-## Next
-
-- [ ] **Security (R1 — low / regression guard):** The spec-mandated Phase-4 guard is missing
+- [x] **Security (R1 — low / regression guard) — fixed in #41:** The spec-mandated Phase-4 guard is missing
   (`design/mcp-connection-authority.md:161`): nothing asserts `connections::get_password` /
   `PgPoolOptions::connect_with` are unreachable from the `--mcp` entry. The invariant holds today
   (`run_mcp` builds only a `ProxyClient`, `lib.rs:697`), but UI and MCP share one binary, so the
@@ -139,7 +149,7 @@
   `#[test]` asserting `run_mcp`'s call graph references no `Core`/`PoolRegistry`/credential symbol —
   ideally move the proxy path into its own crate so the linker enforces it.
 
-- [ ] **Security (R1 — low / regression guard):** `execute_migration` Phase B (`execute.rs:374-411`)
+- [x] **Security (R1 — low / regression guard) — fixed in #41:** `execute_migration` Phase B (`execute.rs:374-411`)
   runs approved statements against the `PgPool` captured at `execute.rs:321` *before* the human
   approval prompts, with no post-prompt authority re-check — unlike the single-statement path, which
   re-acquires via `core.pool()`→`get_open` inside `run_decoded` and fails closed if the human
@@ -148,7 +158,7 @@
   than the registry seam. **Fix direction:** re-acquire the pool via `core.pool(conn)` at the top of
   Phase B so `get_open` re-validates authority after the prompts.
 
-- [ ] **Security (R1 — low / hardening):** The UI "connected" indicator and the backend
+- [x] **Security (R1 — low / hardening) — fixed in #41:** The UI "connected" indicator and the backend
   `PoolRegistry` (the *actual* authority for agent access) can diverge. The human path opens pools via
   `PoolAccess::Human` → `pools.ensure` on **any** DB op (`Core::pool`; reached by `run_query`
   →`core::run_sql`, `list_schemas`, `describe_table`, `export`, `classify_schema`, …), not only via
@@ -163,7 +173,7 @@
   rather than "any open pool," and/or require the explicit `connect` flow to open pools instead of
   auto-`ensure`-ing on ad-hoc query ops.
 
-- [ ] **Security (R2 — low):** Redaction secret falls back to an all-zero HMAC key. `redactor.rs:90`
+- [x] **Security (R2 — low) — fixed in #41:** Redaction secret falls back to an all-zero HMAC key. `redactor.rs:90`
   does `get_redaction_secret(...)?.unwrap_or([0u8;32])`; if classifications exist but the secret is
   missing (e.g. a transient keychain failure after `insert_classification` committed but before
   `ensure_redaction_secret`), fakes are generated under a publicly-known key. Not a real-value leak
@@ -171,12 +181,6 @@
   weakens cross-connection unlinkability. **Fix direction:** in `build_view`, when classifications
   are non-empty but the secret is `None`, generate-and-persist on the spot or error — never
   substitute the constant key.
-
-## Later
-
-- [ ]
-
-## Done
 
 - [x] **Security (R2 — critical) — fixed in #36:** An agent reads real PII by wrapping a classified column in *any*
   expression. Redaction in `run_decoded` (`src-tauri/src/core/query.rs:211`) only fires when sqlx
