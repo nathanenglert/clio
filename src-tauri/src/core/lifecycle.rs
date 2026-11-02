@@ -12,7 +12,7 @@ pub async fn list_connections(core: &Core) -> Result<Vec<Connection>> {
     let r = async {
         let mut conns = connections::list(&core.meta).await?;
         for c in &mut conns {
-            c.connected = core.pools.is_connected(&c.name).await;
+            c.connected = core.is_connected(&c.name).await;
         }
         Ok::<_, anyhow::Error>(conns)
     }
@@ -47,8 +47,10 @@ pub async fn connect(core: &Core, name: &str) -> Result<Option<ClassifyOutcome>>
         core.pools.connect(&c).await.map(|_| ())?;
         // Run the heuristic classifier synchronously. The privacy guarantee
         // ("MCP returns redacted data after connect") depends on this
-        // completing before the connect call returns to the agent. Failures
-        // are tolerated — the pool stays up; the UI just doesn't get a toast.
+        // completing before the connect call returns to the agent. A failure
+        // fails closed: the pool stays up for the human, but it is never
+        // marked classified, so agents are refused it (see `Core::pool`). The
+        // UI warns on a `None` outcome.
         let outcome = super::sensitivity::classify_schema(core, name).await.ok();
         Ok::<_, anyhow::Error>(outcome)
     }
@@ -64,7 +66,9 @@ pub async fn connect(core: &Core, name: &str) -> Result<Option<ClassifyOutcome>>
 /// *human* core opens the pool in `resolve_connect` — or declines. The agent
 /// core itself can never open a pool (`PoolAccess::Agent`).
 pub async fn request_connect(core: &Core, connection: &str) -> Result<()> {
-    if core.pools.is_connected(connection).await {
+    // Open *and classified* — an open pool whose scan failed still needs the
+    // human to reconnect it.
+    if core.pools.is_agent_ready(connection).await {
         return Ok(());
     }
     let (id, rx) = core.pending_connects.register(connection.to_string()).await;
@@ -87,7 +91,9 @@ pub async fn request_connect(core: &Core, connection: &str) -> Result<()> {
 
     match rx.await {
         Ok(true) => Ok(()),
-        Ok(false) => Err(anyhow::anyhow!("the human declined to connect '{connection}'")),
+        Ok(false) => Err(anyhow::anyhow!(
+            "'{connection}' was not connected: the human declined, or its sensitivity scan failed"
+        )),
         Err(_) => Err(anyhow::anyhow!("connect request was cancelled before a decision")),
     }
 }

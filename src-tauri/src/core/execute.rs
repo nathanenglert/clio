@@ -23,8 +23,9 @@ use crate::types::{ActivityEvent, QueryResult};
 use super::permission::{
     MigrationRequest, MigrationStatement, MigrationVerdict, PermissionRequest, PermissionVerdict,
 };
+use super::lineage;
 use super::policy::{self, OpKind, StmtInfo, StmtKind, Verdict};
-use super::query::{cap_payload, run_decoded, sanitize_db_error};
+use super::query::{cap_payload, reject_untraceable, run_decoded, sanitize_db_error};
 use super::Core;
 
 pub async fn execute_statement(
@@ -84,10 +85,42 @@ async fn run_with_gate(
     let rules = policy::default_rules();
     let verdict = policy::evaluate(&rules, &stmt, estimate);
 
-    // 5. Branch on verdict.
+    let view = {
+        let connection = crate::connections::get(&core.meta, conn).await?;
+        core.redactor_cache
+            .view_for(&core.meta, &pool, conn, &connection.id)
+            .await?
+    };
+    // Refuse untraceable SQL before asking the human anything: `run_decoded`
+    // would refuse it after their approval anyway.
+    reject_untraceable(core, view.is_some(), sql)?;
+
+    // A write that touches a classified table can copy classified values
+    // somewhere unredacted — into an unclassified column or table, or back out
+    // through RETURNING — so it never rides a row-bounded allow rule.
+    let verdict = match verdict {
+        Verdict::Allow { .. } if stmt.kind.op_kind() != OpKind::Read => {
+            match &view {
+                Some(v) if lineage::references_classified_table(sql, v) => Verdict::Prompt {
+                    rule: "Write touching classified data — prompt".into(),
+                    reason: "This write reads or modifies a table with classified \
+                             (PHI/PCI/PII) columns, so it could copy their values somewhere \
+                             unredacted"
+                        .into(),
+                },
+                _ => verdict,
+            }
+        }
+        v => v,
+    };
+
+    // 5. Branch on verdict. A read that runs with no human approval runs in a
+    //    read-only transaction, so a write the classifier missed still fails.
+    let mut read_only = false;
     let final_sql: String = match verdict {
         Verdict::Allow { rule } => {
             tracing::debug!(rule = %rule, "execute_statement: allowed by policy");
+            read_only = stmt.kind.op_kind() == OpKind::Read;
             sql.to_string()
         }
         Verdict::Block { rule, reason } => {
@@ -136,23 +169,53 @@ async fn run_with_gate(
 
     // 6. Run the (possibly-modified) SQL. `reveal=false` — the MCP path
     //    never reveals sensitive data; see design/redaction.md §"MCP scope".
-    run_decoded(core, conn, &final_sql, /* reveal */ false).await
+    run_decoded(core, conn, &final_sql, /* reveal */ false, read_only).await
 }
 
-/// Run `EXPLAIN (FORMAT JSON) <sql>` and pull the planner's row estimate
-/// out of the first plan node. Returns `None` on any failure — DDL gets
-/// rejected by EXPLAIN, INSERT VALUES often returns 0 (which is fine and
-/// matches what the planner thinks).
+/// Run `EXPLAIN (FORMAT JSON) <sql>` and pull the planner's estimate of the
+/// rows the statement writes (see [`plan_rows`]). Returns `None` on any
+/// failure — DDL gets rejected by EXPLAIN.
 async fn estimate_rows(pool: &sqlx::PgPool, sql: &str) -> Option<u64> {
     let explained = format!("EXPLAIN (FORMAT JSON) {sql}");
     let row = sqlx::query(&explained).fetch_one(pool).await.ok()?;
     let plan: serde_json::Value = row.try_get(0).ok()?;
-    plan.as_array()?
-        .first()?
-        .get("Plan")?
-        .get("Plan Rows")?
-        .as_f64()
-        .map(|n| n.round().max(0.0) as u64)
+    plan_rows(&plan)
+}
+
+/// Rows a write will touch, from `EXPLAIN (FORMAT JSON)` output. A
+/// `ModifyTable` node reports 0 `Plan Rows` (it returns nothing without
+/// RETURNING); the rows it modifies are its input's — the `Outer` child. Sums
+/// that across every `ModifyTable` in the tree, so a data-modifying CTE under
+/// a `SELECT count(*)` counts too. A plan with no `ModifyTable` falls back to
+/// the top node's estimate.
+fn plan_rows(explained: &serde_json::Value) -> Option<u64> {
+    use serde_json::Value;
+    fn modified_rows(node: &Value, out: &mut Vec<f64>) {
+        let children: &[Value] = node
+            .get("Plans")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if node.get("Node Type").and_then(Value::as_str) == Some("ModifyTable") {
+            let input = children
+                .iter()
+                .find(|c| c.get("Parent Relationship").and_then(Value::as_str) == Some("Outer"))
+                .or(children.first());
+            out.push(input.and_then(|c| c.get("Plan Rows")).and_then(Value::as_f64).unwrap_or(0.0));
+        }
+        for c in children {
+            modified_rows(c, out);
+        }
+    }
+    let top = explained.as_array()?.first()?.get("Plan")?;
+    let mut writes = Vec::new();
+    modified_rows(top, &mut writes);
+    let rows = if writes.is_empty() {
+        top.get("Plan Rows")?.as_f64()?
+    } else {
+        writes.iter().sum()
+    };
+    Some(rows.round().max(0.0) as u64)
 }
 
 /// Re-evaluate human-edited SQL before it runs. When a user approves a Prompt
@@ -315,10 +378,10 @@ async fn run_migration_with_gate(
         }
     };
 
-    // Acquire the pool up front (just an Arc clone — holds no locks) so we
-    // fail fast if the connection is gone. The transaction is NOT opened yet:
-    // we resolve every verdict first.
-    let pool = core.pool(conn).await?;
+    // Check the connection up front so we fail fast if it's gone, before
+    // prompting. Phase B re-acquires the pool after the prompts. The
+    // transaction is NOT opened yet: we resolve every verdict first.
+    core.pool(conn).await?;
 
     // ── Phase A: resolve every statement to its final SQL, before any DB
     // work. A deviation pauses for the standard single-statement card. A Deny
@@ -369,6 +432,12 @@ async fn run_migration_with_gate(
         final_sqls.push(final_sql);
     }
 
+    // The prompts above can take arbitrarily long. Re-acquire through the
+    // registry seam so authority is re-checked at the point of use: if the
+    // human disconnected meanwhile, this fails closed with "not connected"
+    // rather than relying on the captured handle having been closed.
+    let pool = core.pool(conn).await?;
+
     // Whether this connection redacts — governs error-message sanitization for
     // the statements about to run. A failed write can echo real classified
     // values in its DB error (e.g. a unique-violation `Key (email)=(real@x.com)
@@ -399,7 +468,7 @@ async fn run_migration_with_gate(
             Some(tx) => sqlx::query(final_sql).execute(&mut **tx).await,
             None => sqlx::query(final_sql).execute(&pool).await,
         };
-        run.map(|_| ())
+        let done = run
             .map_err(|e| sanitize_db_error(core, classified, e))
             .with_context(|| format!("stmt {idx} failed"))?;
         results.push(QueryResult {
@@ -408,6 +477,7 @@ async fn run_migration_with_gate(
             row_count: 0,
             truncated: false,
             elapsed_ms: exec_started.elapsed().as_millis() as u64,
+            rows_affected: Some(done.rows_affected()),
             redaction_meta: None,
         });
     }
@@ -460,6 +530,7 @@ fn stmt_kind_str(k: StmtKind) -> &'static str {
         StmtKind::CreateOther => "create_other",
         StmtKind::AlterTable => "alter_table",
         StmtKind::AlterOther => "alter_other",
+        StmtKind::Do => "do",
         StmtKind::Other => "other",
     }
 }
@@ -546,7 +617,7 @@ mod tests {
         .unwrap();
 
         let pools = PoolRegistry::default();
-        pools.insert_for_test(TEST_CONN, pool.clone()).await;
+        pools.insert_for_test(TEST_CONN, pool.clone(), true).await;
 
         let (tx, rx) = unbounded_channel();
         let emit: EmitFn = Arc::new(move |e| {
@@ -629,6 +700,182 @@ mod tests {
         h.drop_schema().await;
         let res = r.expect("an allowed SELECT should run");
         assert_eq!(res.row_count, 1, "SELECT 1 returns one row");
+    }
+
+    /// An allowed read runs in a read-only transaction: a SELECT that writes
+    /// through a function (`nextval`) is refused by Postgres instead of running
+    /// with no prompt. Same for the SELECT-only `run_query` tool.
+    /// A write without RETURNING returns no rows, but reports how many it
+    /// touched, so the UI can say "3 rows updated" instead of "0 rows".
+    #[tokio::test]
+    async fn write_reports_rows_affected() {
+        let Some(mut h) = setup().await else { return };
+        sqlx::raw_sql(&format!(
+            "CREATE TABLE {s}.t (n int); INSERT INTO {s}.t SELECT generate_series(1, 5)",
+            s = h.schema
+        ))
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        let core = h.core.clone();
+        let sql = format!("UPDATE {}.t SET n = n WHERE n <= 3", h.schema);
+        let handle = tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql, None).await });
+        h.resolve_next_permission(PermissionVerdict::Allow).await;
+        let r = handle.await.unwrap();
+        h.drop_schema().await;
+        let res = r.expect("approved update runs");
+        assert_eq!(res.row_count, 0, "nothing returned");
+        assert_eq!(res.rows_affected, Some(3), "three rows updated");
+    }
+
+    #[tokio::test]
+    async fn allowed_reads_are_read_only() {
+        let Some(h) = setup().await else { return };
+        sqlx::query(&format!("CREATE SEQUENCE {}.s", h.schema))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        let sql = format!("SELECT nextval('{}.s')", h.schema);
+        let via_gate = execute_statement(&h.core, TEST_CONN, &sql, None).await;
+        let via_query = crate::core::run_query(&h.core, TEST_CONN, &sql, false).await;
+        let last: Option<i64> =
+            sqlx::query_scalar(&format!("SELECT last_value FROM {}.s WHERE is_called", h.schema))
+                .fetch_optional(&h.pool)
+                .await
+                .unwrap();
+        h.drop_schema().await;
+
+        let e = format!("{:#}", via_gate.expect_err("execute_statement read must be read-only"));
+        assert!(e.contains("read-only"), "expected a read-only error, got: {e}");
+        let e = format!("{:#}", via_query.expect_err("run_query must be read-only"));
+        assert!(e.contains("read-only"), "expected a read-only error, got: {e}");
+        assert_eq!(last, None, "the sequence must never have advanced");
+    }
+
+    /// `SELECT … INTO` creates a table: `run_query` refuses it outright, and
+    /// `execute_statement` sends it to the human instead of the Read allow rule.
+    #[tokio::test]
+    async fn select_into_is_not_a_read() {
+        let Some(mut h) = setup().await else { return };
+        let sql = format!("SELECT 1 AS n INTO TABLE {}.copied", h.schema);
+
+        let q = crate::core::run_query(&h.core, TEST_CONN, &sql, false).await;
+        let e = format!("{:#}", q.expect_err("run_query must refuse SELECT INTO"));
+        assert!(e.contains("execute_statement"), "expected a pointer to the gate, got: {e}");
+
+        let core = h.core.clone();
+        let sql2 = sql.clone();
+        let handle =
+            tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql2, None).await });
+        h.resolve_next_permission(PermissionVerdict::Deny).await;
+        let r = handle.await.unwrap();
+        let copied = h.table_exists("copied").await;
+        h.drop_schema().await;
+
+        r.expect_err("denied");
+        assert!(!copied, "SELECT INTO must not run without approval");
+    }
+
+    /// The laundering hole: a small `INSERT … SELECT … RETURNING` into
+    /// `public.*` used to auto-run under the ≤1000-row allow rule and hand the
+    /// copied classified value straight back. It must prompt instead.
+    #[tokio::test]
+    async fn write_reading_classified_table_prompts() {
+        let Some(mut h) = setup().await else { return };
+        setup_classified_patients(&h).await;
+        let table = format!("public.it_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE TABLE {table} (v text)"))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+
+        let core = h.core.clone();
+        let sql = format!(
+            "INSERT INTO {table} (v) SELECT ssn FROM {}.patients RETURNING v",
+            h.schema
+        );
+        let handle = tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql, None).await });
+        let id = tokio::time::timeout(Duration::from_secs(5), h.next_request_id("permission_required")).await;
+        if let Ok(id) = &id {
+            h.core.pending_permissions.resolve(id, PermissionVerdict::Deny).await.unwrap();
+        }
+        let r = handle.await.unwrap();
+        let copied: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        let _ = sqlx::query(&format!("DROP TABLE {table}")).execute(&h.pool).await;
+        h.drop_schema().await;
+
+        assert!(id.is_ok(), "a write reading a classified table must prompt");
+        r.expect_err("denied");
+        assert_eq!(copied, 0, "nothing may be copied without approval");
+    }
+
+    // ── Row estimate ─────────────────────────────────────────────────────
+
+    /// Shapes captured from Postgres 16 `EXPLAIN (FORMAT JSON)`: the top
+    /// `ModifyTable` of a plain write reports 0 rows, so the estimate must come
+    /// from its input; a data-modifying CTE hides the write under a 1-row
+    /// aggregate.
+    #[test]
+    fn plan_rows_reads_the_modify_table_input() {
+        let update = serde_json::json!([{ "Plan": {
+            "Node Type": "ModifyTable", "Plan Rows": 0,
+            "Plans": [{ "Node Type": "Seq Scan", "Parent Relationship": "Outer", "Plan Rows": 100 }]
+        }}]);
+        assert_eq!(plan_rows(&update), Some(100));
+
+        let insert_values = serde_json::json!([{ "Plan": {
+            "Node Type": "ModifyTable", "Plan Rows": 0,
+            "Plans": [{ "Node Type": "Result", "Parent Relationship": "Outer", "Plan Rows": 1 }]
+        }}]);
+        assert_eq!(plan_rows(&insert_values), Some(1));
+
+        let cte_write = serde_json::json!([{ "Plan": {
+            "Node Type": "Aggregate", "Plan Rows": 1,
+            "Plans": [
+                { "Node Type": "ModifyTable", "Parent Relationship": "InitPlan", "Plan Rows": 114,
+                  "Plans": [{ "Node Type": "Seq Scan", "Parent Relationship": "Outer", "Plan Rows": 114 }] },
+                { "Node Type": "CTE Scan", "Parent Relationship": "Outer", "Plan Rows": 114 }
+            ]
+        }}]);
+        assert_eq!(plan_rows(&cte_write), Some(114));
+
+        let select = serde_json::json!([{ "Plan": { "Node Type": "Seq Scan", "Plan Rows": 7 } }]);
+        assert_eq!(plan_rows(&select), Some(7));
+        assert_eq!(plan_rows(&serde_json::json!({})), None);
+    }
+
+    /// Live check of the same thing: a write touching more rows than the
+    /// `public.*` allow rule's cap must prompt, not auto-run.
+    #[tokio::test]
+    async fn large_public_write_is_estimated_and_prompts() {
+        let Some(mut h) = setup().await else { return };
+        // `public` is the allow rule's schema, so the table has to live there.
+        let table = format!("public.it_{}", uuid::Uuid::new_v4().simple());
+        sqlx::raw_sql(&format!(
+            "CREATE TABLE {table} (n int); INSERT INTO {table} SELECT generate_series(1, 2000); ANALYZE {table}"
+        ))
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        let est = estimate_rows(&h.pool, &format!("UPDATE {table} SET n = n")).await;
+
+        let core = h.core.clone();
+        let sql = format!("UPDATE {table} SET n = n");
+        let handle = tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql, None).await });
+        let id = tokio::time::timeout(Duration::from_secs(5), h.next_request_id("permission_required")).await;
+        if let Ok(id) = &id {
+            h.core.pending_permissions.resolve(id, PermissionVerdict::Deny).await.unwrap();
+        }
+        let r = handle.await.unwrap();
+        let _ = sqlx::query(&format!("DROP TABLE {table}")).execute(&h.pool).await;
+        h.drop_schema().await;
+
+        assert!(est.is_some_and(|n| n >= 1000), "estimate must reflect the scan, got {est:?}");
+        assert!(id.is_ok(), "a 2000-row public write must prompt");
+        r.expect_err("denied");
     }
 
     // ── Phase 2: re-gate human-edited (Modified) SQL ─────────────────────
@@ -773,6 +1020,33 @@ mod tests {
         assert!(!b, "stmt b was denied");
     }
 
+    /// R1 per-use authority: a human who disconnects while a migration card is
+    /// pending must stop the run at the registry seam, before any statement.
+    #[tokio::test]
+    async fn migration_rechecks_connection_after_prompts() {
+        let Some(mut h) = setup().await else { return };
+        // A registry pool of its own, so dropping it leaves the harness pool open.
+        let own = PgPoolOptions::new().max_connections(2).connect(&test_db_url()).await.unwrap();
+        h.core.pools.insert_for_test(TEST_CONN, own, true).await;
+
+        let core = h.core.clone();
+        let stmts = vec![format!("CREATE TABLE {}.a (id int)", h.schema)];
+        let handle =
+            tokio::spawn(async move { execute_migration(&core, TEST_CONN, stmts, None).await });
+        h.approve_migration(false).await;
+        let card = h.next_request_id("permission_required").await;
+        h.core.pools.drop_pool(TEST_CONN).await; // the human disconnects mid-prompt
+        h.core.pending_permissions.resolve(&card, PermissionVerdict::Allow).await.unwrap();
+
+        let r = handle.await.unwrap();
+        let a = h.table_exists("a").await;
+        h.drop_schema().await;
+
+        let e = format!("{:#}", r.expect_err("a disconnected migration must not run"));
+        assert!(e.contains("not connected"), "expected the registry to refuse, got: {e}");
+        assert!(!a, "no statement may run after the disconnect");
+    }
+
     /// Happy path: every deviation approved, transaction-wrapped — the batch
     /// commits and all statements are present.
     #[tokio::test]
@@ -915,6 +1189,58 @@ mod tests {
         assert_eq!(agg.rows[0][0].as_deref(), Some("1"), "count(*) must not be redacted");
 
         h.drop_schema().await;
+    }
+
+    /// SQL run from a string, and sampled-value catalogs, reach classified
+    /// values with nothing in the statement for redaction to key on. On a
+    /// classified connection the agent is refused them outright.
+    #[tokio::test]
+    async fn untraceable_sql_is_refused_on_classified_connection() {
+        let Some(h) = setup().await else { return };
+        let real = setup_classified_patients(&h).await;
+        let xml = format!(
+            "SELECT query_to_xml('select ssn from {}.patients', true, false, '')",
+            h.schema
+        );
+        let via_gate = execute_statement(&h.core, TEST_CONN, &xml, None).await;
+        let via_query = crate::core::run_query(&h.core, TEST_CONN, &xml, false).await;
+        let stats = crate::core::run_query(
+            &h.core,
+            TEST_CONN,
+            "SELECT most_common_vals::text FROM pg_stats WHERE attname = 'ssn'",
+            false,
+        )
+        .await;
+        h.drop_schema().await;
+
+        for r in [via_gate, via_query, stats] {
+            let e = format!("{:#}", r.expect_err("must be refused"));
+            assert!(e.contains("not available to agents"), "got: {e}");
+            assert!(!e.contains(real.as_str()));
+        }
+    }
+
+    /// Classifications without a stored redaction secret (a keychain write
+    /// failed after they were stored) must get a real secret, never the fixed
+    /// all-zero key.
+    #[tokio::test]
+    async fn missing_redaction_secret_is_created_not_zeroed() {
+        let Some(h) = setup().await else { return };
+        setup_classified_patients(&h).await;
+        let conn_id = connections::get(&h.core.meta, TEST_CONN).await.unwrap().id;
+        let view = h
+            .core
+            .redactor_cache
+            .view_for(&h.core.meta, &h.pool, TEST_CONN, &conn_id)
+            .await;
+        h.drop_schema().await;
+        let view = view.unwrap().expect("classified connection has a view");
+        assert_ne!(*view.secret, [0u8; 32], "must not fake under the all-zero key");
+        assert_eq!(
+            connections::get_redaction_secret(TEST_CONN).unwrap(),
+            Some(*view.secret),
+            "the secret is persisted, so fakes stay stable"
+        );
     }
 
     #[tokio::test]

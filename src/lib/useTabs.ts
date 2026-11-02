@@ -29,6 +29,29 @@ type ConnTabs = {
 type State = Record<string, ConnTabs>;
 
 const STORAGE_KEY = "db.tabs.v1";
+
+// Postgres keywords that can't be used as a bare schema or table name.
+const RESERVED_IDENTS = new Set(
+  (
+    "all analyse analyze and any array as asc asymmetric authorization binary both case cast " +
+    "check collate collation column concurrently constraint create cross current_catalog " +
+    "current_date current_role current_schema current_time current_timestamp current_user " +
+    "default deferrable desc distinct do else end except false fetch for foreign freeze from " +
+    "full grant group having ilike in initially inner intersect into is isnull join lateral " +
+    "leading left like limit localtime localtimestamp natural not notnull null offset on only " +
+    "or order outer overlaps placing primary references returning right select session_user " +
+    "similar some symmetric system_user table tablesample then to trailing true union unique " +
+    "user using variadic verbose when where window with"
+  ).split(" "),
+);
+
+/** Quote a Postgres identifier unless it resolves as written. Unquoted names
+ *  fold to lowercase, so `Patient` must be written `"Patient"`. */
+function quoteIdent(name: string): string {
+  return /^[a-z_][a-z0-9_$]*$/.test(name) && !RESERVED_IDENTS.has(name)
+    ? name
+    : `"${name.replace(/"/g, '""')}"`;
+}
 const DEFAULT_SQL = "SELECT now() AS server_time;";
 
 const emptyConn = (): ConnTabs => ({ tabs: [], activeId: null, nextScratchN: 1 });
@@ -241,7 +264,7 @@ export function useTabs(connectionName: string | null) {
         const tab: Tab = {
           id: newId(),
           title: table,
-          sql: `SELECT *\nFROM ${schema}.${table}\nLIMIT 100;`,
+          sql: `SELECT *\nFROM ${quoteIdent(schema)}.${quoteIdent(table)}\nLIMIT 100;`,
           dirty: false,
           source: "table",
           schemaTableKey: key,

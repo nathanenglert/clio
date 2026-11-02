@@ -213,6 +213,11 @@ pub struct QueryResult {
     pub row_count: usize,
     pub truncated: bool,
     pub elapsed_ms: u64,
+    /// Rows the statement inserted/updated/deleted — the count from its
+    /// command tag. `row_count` only counts rows *returned*, which is 0 for a
+    /// write without RETURNING.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_affected: Option<u64>,
     /// Present only when one or more result columns were redacted. Lets the MCP
     /// serializer attach a single human-readable footer line so the agent knows
     /// the data is masked.
