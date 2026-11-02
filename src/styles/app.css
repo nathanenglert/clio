@@ -1911,13 +1911,22 @@ body.dragging-y * { cursor: inherit !important; }
    See design/result-editing.md
    ───────────────────────────────────────────────────────────────── */
 
-/* Read-only banner */
+/* Read-only banner. Pinned to the top of the scrolling grid at a fixed
+   height, so the sticky header row can pin just below it instead of
+   scrolling underneath it. */
+.grid-wrap { --readonly-banner-h: 30px; }
 .readonly-banner {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 14px;
-  background: rgba(212, 161, 85, 0.05);
+  height: var(--readonly-banner-h);
+  box-sizing: border-box;
+  padding: 0 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  /* Tint over the opaque grid background, so rows scrolling under it don't
+     show through. */
+  background: linear-gradient(rgba(212, 161, 85, 0.05), rgba(212, 161, 85, 0.05)) var(--bg-app);
   border-bottom: 1px solid var(--line-soft);
   font-size: var(--fs-xs);
   color: var(--text-secondary);
@@ -1925,6 +1934,7 @@ body.dragging-y * { cursor: inherit !important; }
   top: 0;
   z-index: 2;
 }
+.readonly-banner + .grid thead th { top: var(--readonly-banner-h); }
 .readonly-banner .rb-icon { font-size: 12px; color: var(--text-muted); }
 .readonly-banner .rb-strong { color: var(--text-primary); }
 .readonly-banner .rb-muted { color: var(--text-muted); }
