@@ -468,7 +468,7 @@ async fn run_migration_with_gate(
             Some(tx) => sqlx::query(final_sql).execute(&mut **tx).await,
             None => sqlx::query(final_sql).execute(&pool).await,
         };
-        run.map(|_| ())
+        let done = run
             .map_err(|e| sanitize_db_error(core, classified, e))
             .with_context(|| format!("stmt {idx} failed"))?;
         results.push(QueryResult {
@@ -477,6 +477,7 @@ async fn run_migration_with_gate(
             row_count: 0,
             truncated: false,
             elapsed_ms: exec_started.elapsed().as_millis() as u64,
+            rows_affected: Some(done.rows_affected()),
             redaction_meta: None,
         });
     }
@@ -704,6 +705,29 @@ mod tests {
     /// An allowed read runs in a read-only transaction: a SELECT that writes
     /// through a function (`nextval`) is refused by Postgres instead of running
     /// with no prompt. Same for the SELECT-only `run_query` tool.
+    /// A write without RETURNING returns no rows, but reports how many it
+    /// touched, so the UI can say "3 rows updated" instead of "0 rows".
+    #[tokio::test]
+    async fn write_reports_rows_affected() {
+        let Some(mut h) = setup().await else { return };
+        sqlx::raw_sql(&format!(
+            "CREATE TABLE {s}.t (n int); INSERT INTO {s}.t SELECT generate_series(1, 5)",
+            s = h.schema
+        ))
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        let core = h.core.clone();
+        let sql = format!("UPDATE {}.t SET n = n WHERE n <= 3", h.schema);
+        let handle = tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql, None).await });
+        h.resolve_next_permission(PermissionVerdict::Allow).await;
+        let r = handle.await.unwrap();
+        h.drop_schema().await;
+        let res = r.expect("approved update runs");
+        assert_eq!(res.row_count, 0, "nothing returned");
+        assert_eq!(res.rows_affected, Some(3), "three rows updated");
+    }
+
     #[tokio::test]
     async fn allowed_reads_are_read_only() {
         let Some(h) = setup().await else { return };

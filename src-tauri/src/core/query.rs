@@ -243,9 +243,9 @@ pub(super) async fn run_decoded(
     let fetched = if read_only {
         fetch_read_only(&pool, sql).await
     } else {
-        sqlx::query(sql).fetch_all(&pool).await
+        fetch_counted(&pool, sql).await
     };
-    let rows = match fetched {
+    let (rows, rows_affected) = match fetched {
         Ok(r) => r,
         Err(e) => return Err(sanitize_db_error(core, classified, e)),
     };
@@ -361,6 +361,7 @@ pub(super) async fn run_decoded(
         row_count: rows.len(),
         truncated,
         elapsed_ms: started.elapsed().as_millis() as u64,
+        rows_affected: Some(rows_affected),
         redaction_meta,
     })
 }
@@ -384,17 +385,34 @@ pub(super) fn reject_untraceable(core: &Core, classified: bool, sql: &str) -> Re
     }
 }
 
+type Fetched = (Vec<sqlx::postgres::PgRow>, u64);
+
+/// Run one statement, collecting its rows and the row count from its command
+/// tag (rows updated by an UPDATE without RETURNING, say).
+async fn fetch_counted<'e, E>(executor: E, sql: &'e str) -> std::result::Result<Fetched, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    use futures_util::TryStreamExt;
+    let mut stream = executor.fetch_many(sqlx::query(sql));
+    let (mut rows, mut affected) = (Vec::new(), 0);
+    while let Some(step) = stream.try_next().await? {
+        match step {
+            sqlx::Either::Left(done) => affected += done.rows_affected(),
+            sqlx::Either::Right(row) => rows.push(row),
+        }
+    }
+    Ok((rows, affected))
+}
+
 /// Run `sql` inside a `READ ONLY` transaction that is always rolled back.
-async fn fetch_read_only(
-    pool: &sqlx::PgPool,
-    sql: &str,
-) -> std::result::Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+async fn fetch_read_only(pool: &sqlx::PgPool, sql: &str) -> std::result::Result<Fetched, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION READ ONLY").execute(&mut *tx).await?;
-    let rows = sqlx::query(sql).fetch_all(&mut *tx).await;
+    let fetched = fetch_counted(&mut *tx, sql).await;
     // Nothing to keep: a read-only transaction can't have changed anything.
     let _ = tx.rollback().await;
-    rows
+    fetched
 }
 
 /// Convert a query execution error for return to the caller. On the **agent
