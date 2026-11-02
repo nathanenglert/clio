@@ -1162,6 +1162,29 @@ mod tests {
         }
     }
 
+    /// Classifications without a stored redaction secret (a keychain write
+    /// failed after they were stored) must get a real secret, never the fixed
+    /// all-zero key.
+    #[tokio::test]
+    async fn missing_redaction_secret_is_created_not_zeroed() {
+        let Some(h) = setup().await else { return };
+        setup_classified_patients(&h).await;
+        let conn_id = connections::get(&h.core.meta, TEST_CONN).await.unwrap().id;
+        let view = h
+            .core
+            .redactor_cache
+            .view_for(&h.core.meta, &h.pool, TEST_CONN, &conn_id)
+            .await;
+        h.drop_schema().await;
+        let view = view.unwrap().expect("classified connection has a view");
+        assert_ne!(*view.secret, [0u8; 32], "must not fake under the all-zero key");
+        assert_eq!(
+            connections::get_redaction_secret(TEST_CONN).unwrap(),
+            Some(*view.secret),
+            "the secret is persisted, so fakes stay stable"
+        );
+    }
+
     #[tokio::test]
     async fn db_error_does_not_echo_classified_value() {
         let Some(h) = setup().await else { return };
