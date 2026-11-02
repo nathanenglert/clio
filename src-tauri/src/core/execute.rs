@@ -84,10 +84,13 @@ async fn run_with_gate(
     let rules = policy::default_rules();
     let verdict = policy::evaluate(&rules, &stmt, estimate);
 
-    // 5. Branch on verdict.
+    // 5. Branch on verdict. A read that runs with no human approval runs in a
+    //    read-only transaction, so a write the classifier missed still fails.
+    let mut read_only = false;
     let final_sql: String = match verdict {
         Verdict::Allow { rule } => {
             tracing::debug!(rule = %rule, "execute_statement: allowed by policy");
+            read_only = stmt.kind.op_kind() == OpKind::Read;
             sql.to_string()
         }
         Verdict::Block { rule, reason } => {
@@ -136,7 +139,7 @@ async fn run_with_gate(
 
     // 6. Run the (possibly-modified) SQL. `reveal=false` — the MCP path
     //    never reveals sensitive data; see design/redaction.md §"MCP scope".
-    run_decoded(core, conn, &final_sql, /* reveal */ false).await
+    run_decoded(core, conn, &final_sql, /* reveal */ false, read_only).await
 }
 
 /// Run `EXPLAIN (FORMAT JSON) <sql>` and pull the planner's row estimate
@@ -629,6 +632,57 @@ mod tests {
         h.drop_schema().await;
         let res = r.expect("an allowed SELECT should run");
         assert_eq!(res.row_count, 1, "SELECT 1 returns one row");
+    }
+
+    /// An allowed read runs in a read-only transaction: a SELECT that writes
+    /// through a function (`nextval`) is refused by Postgres instead of running
+    /// with no prompt. Same for the SELECT-only `run_query` tool.
+    #[tokio::test]
+    async fn allowed_reads_are_read_only() {
+        let Some(h) = setup().await else { return };
+        sqlx::query(&format!("CREATE SEQUENCE {}.s", h.schema))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        let sql = format!("SELECT nextval('{}.s')", h.schema);
+        let via_gate = execute_statement(&h.core, TEST_CONN, &sql, None).await;
+        let via_query = crate::core::run_query(&h.core, TEST_CONN, &sql, false).await;
+        let last: Option<i64> =
+            sqlx::query_scalar(&format!("SELECT last_value FROM {}.s WHERE is_called", h.schema))
+                .fetch_optional(&h.pool)
+                .await
+                .unwrap();
+        h.drop_schema().await;
+
+        let e = format!("{:#}", via_gate.expect_err("execute_statement read must be read-only"));
+        assert!(e.contains("read-only"), "expected a read-only error, got: {e}");
+        let e = format!("{:#}", via_query.expect_err("run_query must be read-only"));
+        assert!(e.contains("read-only"), "expected a read-only error, got: {e}");
+        assert_eq!(last, None, "the sequence must never have advanced");
+    }
+
+    /// `SELECT … INTO` creates a table: `run_query` refuses it outright, and
+    /// `execute_statement` sends it to the human instead of the Read allow rule.
+    #[tokio::test]
+    async fn select_into_is_not_a_read() {
+        let Some(mut h) = setup().await else { return };
+        let sql = format!("SELECT 1 AS n INTO TABLE {}.copied", h.schema);
+
+        let q = crate::core::run_query(&h.core, TEST_CONN, &sql, false).await;
+        let e = format!("{:#}", q.expect_err("run_query must refuse SELECT INTO"));
+        assert!(e.contains("execute_statement"), "expected a pointer to the gate, got: {e}");
+
+        let core = h.core.clone();
+        let sql2 = sql.clone();
+        let handle =
+            tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql2, None).await });
+        h.resolve_next_permission(PermissionVerdict::Deny).await;
+        let r = handle.await.unwrap();
+        let copied = h.table_exists("copied").await;
+        h.drop_schema().await;
+
+        r.expect_err("denied");
+        assert!(!copied, "SELECT INTO must not run without approval");
     }
 
     // ── Phase 2: re-gate human-edited (Modified) SQL ─────────────────────

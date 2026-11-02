@@ -89,7 +89,8 @@ pub struct StmtInfo {
     /// If the outer statement is a Query but a CTE inside it writes, this
     /// promotes the classification to the most restrictive kind found.
     /// E.g. `WITH x AS (DELETE FROM leads ...) SELECT * FROM x` parses as
-    /// `Delete` here, not `Select`.
+    /// `Delete` here, not `Select`. `SELECT … INTO` sets it too (as
+    /// `CreateTable`).
     pub cte_writes: bool,
 }
 
@@ -360,6 +361,8 @@ fn set_expr_max_kind(s: &SetExpr) -> Option<StmtKind> {
                 (None, None) => None,
             }
         }
+        // `SELECT … INTO t` creates and fills a table: DDL, not a read.
+        SetExpr::Select(sel) if sel.into.is_some() => Some(StmtKind::CreateTable),
         SetExpr::Select(_) | SetExpr::Values(_) | SetExpr::Table(_) => None,
     }
 }
@@ -555,6 +558,21 @@ mod tests {
         match evaluate(&rules(), &s, None) {
             Verdict::Allow { rule } => assert_eq!(rule, "Read"),
             v => panic!("expected Allow, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn select_into_is_create_table_and_prompts() {
+        // `SELECT … INTO` creates a table from the result; it must not ride the
+        // Read allow rule.
+        for sql in [
+            "SELECT mrn, ssn INTO TABLE public.zz_exfil FROM clinical.patients",
+            "SELECT * INTO zz FROM patients",
+            "WITH p AS (SELECT ssn FROM patients) SELECT * INTO zz FROM p",
+        ] {
+            let s = parse_one(sql);
+            assert_eq!(s.kind, StmtKind::CreateTable, "{sql}");
+            assert!(matches!(evaluate(&rules(), &s, None), Verdict::Prompt { .. }), "{sql}");
         }
     }
 

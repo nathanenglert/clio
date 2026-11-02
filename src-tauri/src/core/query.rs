@@ -82,6 +82,23 @@ pub(super) fn validate_select_only(sql: &str) -> Result<()> {
     Ok(())
 }
 
+/// The lexical check above can't see writes that *start* with `select`
+/// (`SELECT … INTO new_table`). When the statement parses, reject anything the
+/// policy classifier doesn't call a read, with a message the agent can act on.
+/// The read-only transaction in `run_decoded` is the real enforcement, and
+/// covers SQL the parser can't handle.
+fn reject_parsed_non_read(sql: &str) -> Result<()> {
+    if let Ok(stmts) = super::policy::parse_sql(sql) {
+        if stmts.iter().any(|s| s.kind != super::policy::StmtKind::Select) {
+            return Err(anyhow!(
+                "run_query is read-only and this statement writes (e.g. SELECT … INTO creates a \
+                 table); use execute_statement so the human can approve it"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn strip_comments_lower(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     let bytes = sql.as_bytes();
@@ -139,7 +156,8 @@ pub async fn run_query(
     let started = Instant::now();
     let r = async {
         validate_select_only(sql)?;
-        run_decoded(core, conn, sql, reveal).await
+        reject_parsed_non_read(sql)?;
+        run_decoded(core, conn, sql, reveal, /* read_only */ true).await
     }
     .await;
 
@@ -164,7 +182,7 @@ pub async fn run_sql(
     reveal: bool,
 ) -> Result<QueryResult> {
     let started = Instant::now();
-    let r = run_decoded(core, conn, sql, reveal).await;
+    let r = run_decoded(core, conn, sql, reveal, /* read_only */ false).await;
 
     let mut detail = sql.replace('\n', " ");
     if detail.len() > 80 {
@@ -180,6 +198,11 @@ pub async fn run_sql(
 /// Used by the gated `execute_statement` path (caller has already evaluated
 /// the policy) and by the SELECT-only `run_query` wrapper above.
 ///
+/// `read_only` runs the statement inside a `READ ONLY` transaction (rolled
+/// back afterwards), so Postgres itself refuses any write — `SELECT … INTO`,
+/// a writing function, `nextval` — that a lexical or parsed check missed.
+/// Agent reads that run without a human approval pass `true`.
+///
 /// Fetches rows via sqlx, applies redaction column-by-column, builds a
 /// `QueryResult`. Works uniformly for SELECT (rows back), and for
 /// INSERT/UPDATE/DELETE without RETURNING (empty rows + empty columns —
@@ -189,6 +212,7 @@ pub(super) async fn run_decoded(
     conn: &str,
     sql: &str,
     reveal: bool,
+    read_only: bool,
 ) -> Result<QueryResult> {
     let started = Instant::now();
     let pool = core.pool(conn).await?;
@@ -215,7 +239,12 @@ pub(super) async fn run_decoded(
         None => false,
     };
 
-    let rows = match sqlx::query(sql).fetch_all(&pool).await {
+    let fetched = if read_only {
+        fetch_read_only(&pool, sql).await
+    } else {
+        sqlx::query(sql).fetch_all(&pool).await
+    };
+    let rows = match fetched {
         Ok(r) => r,
         Err(e) => return Err(sanitize_db_error(core, classified, e)),
     };
@@ -335,6 +364,19 @@ pub(super) async fn run_decoded(
     })
 }
 
+
+/// Run `sql` inside a `READ ONLY` transaction that is always rolled back.
+async fn fetch_read_only(
+    pool: &sqlx::PgPool,
+    sql: &str,
+) -> std::result::Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION READ ONLY").execute(&mut *tx).await?;
+    let rows = sqlx::query(sql).fetch_all(&mut *tx).await;
+    // Nothing to keep: a read-only transaction can't have changed anything.
+    let _ = tx.rollback().await;
+    rows
+}
 
 /// Convert a query execution error for return to the caller. On the **agent
 /// path** and a **classified connection**, a Postgres `DatabaseError` is
