@@ -142,20 +142,50 @@ async fn run_with_gate(
     run_decoded(core, conn, &final_sql, /* reveal */ false, read_only).await
 }
 
-/// Run `EXPLAIN (FORMAT JSON) <sql>` and pull the planner's row estimate
-/// out of the first plan node. Returns `None` on any failure — DDL gets
-/// rejected by EXPLAIN, INSERT VALUES often returns 0 (which is fine and
-/// matches what the planner thinks).
+/// Run `EXPLAIN (FORMAT JSON) <sql>` and pull the planner's estimate of the
+/// rows the statement writes (see [`plan_rows`]). Returns `None` on any
+/// failure — DDL gets rejected by EXPLAIN.
 async fn estimate_rows(pool: &sqlx::PgPool, sql: &str) -> Option<u64> {
     let explained = format!("EXPLAIN (FORMAT JSON) {sql}");
     let row = sqlx::query(&explained).fetch_one(pool).await.ok()?;
     let plan: serde_json::Value = row.try_get(0).ok()?;
-    plan.as_array()?
-        .first()?
-        .get("Plan")?
-        .get("Plan Rows")?
-        .as_f64()
-        .map(|n| n.round().max(0.0) as u64)
+    plan_rows(&plan)
+}
+
+/// Rows a write will touch, from `EXPLAIN (FORMAT JSON)` output. A
+/// `ModifyTable` node reports 0 `Plan Rows` (it returns nothing without
+/// RETURNING); the rows it modifies are its input's — the `Outer` child. Sums
+/// that across every `ModifyTable` in the tree, so a data-modifying CTE under
+/// a `SELECT count(*)` counts too. A plan with no `ModifyTable` falls back to
+/// the top node's estimate.
+fn plan_rows(explained: &serde_json::Value) -> Option<u64> {
+    use serde_json::Value;
+    fn modified_rows(node: &Value, out: &mut Vec<f64>) {
+        let children: &[Value] = node
+            .get("Plans")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if node.get("Node Type").and_then(Value::as_str) == Some("ModifyTable") {
+            let input = children
+                .iter()
+                .find(|c| c.get("Parent Relationship").and_then(Value::as_str) == Some("Outer"))
+                .or(children.first());
+            out.push(input.and_then(|c| c.get("Plan Rows")).and_then(Value::as_f64).unwrap_or(0.0));
+        }
+        for c in children {
+            modified_rows(c, out);
+        }
+    }
+    let top = explained.as_array()?.first()?.get("Plan")?;
+    let mut writes = Vec::new();
+    modified_rows(top, &mut writes);
+    let rows = if writes.is_empty() {
+        top.get("Plan Rows")?.as_f64()?
+    } else {
+        writes.iter().sum()
+    };
+    Some(rows.round().max(0.0) as u64)
 }
 
 /// Re-evaluate human-edited SQL before it runs. When a user approves a Prompt
@@ -683,6 +713,72 @@ mod tests {
 
         r.expect_err("denied");
         assert!(!copied, "SELECT INTO must not run without approval");
+    }
+
+    // ── Row estimate ─────────────────────────────────────────────────────
+
+    /// Shapes captured from Postgres 16 `EXPLAIN (FORMAT JSON)`: the top
+    /// `ModifyTable` of a plain write reports 0 rows, so the estimate must come
+    /// from its input; a data-modifying CTE hides the write under a 1-row
+    /// aggregate.
+    #[test]
+    fn plan_rows_reads_the_modify_table_input() {
+        let update = serde_json::json!([{ "Plan": {
+            "Node Type": "ModifyTable", "Plan Rows": 0,
+            "Plans": [{ "Node Type": "Seq Scan", "Parent Relationship": "Outer", "Plan Rows": 100 }]
+        }}]);
+        assert_eq!(plan_rows(&update), Some(100));
+
+        let insert_values = serde_json::json!([{ "Plan": {
+            "Node Type": "ModifyTable", "Plan Rows": 0,
+            "Plans": [{ "Node Type": "Result", "Parent Relationship": "Outer", "Plan Rows": 1 }]
+        }}]);
+        assert_eq!(plan_rows(&insert_values), Some(1));
+
+        let cte_write = serde_json::json!([{ "Plan": {
+            "Node Type": "Aggregate", "Plan Rows": 1,
+            "Plans": [
+                { "Node Type": "ModifyTable", "Parent Relationship": "InitPlan", "Plan Rows": 114,
+                  "Plans": [{ "Node Type": "Seq Scan", "Parent Relationship": "Outer", "Plan Rows": 114 }] },
+                { "Node Type": "CTE Scan", "Parent Relationship": "Outer", "Plan Rows": 114 }
+            ]
+        }}]);
+        assert_eq!(plan_rows(&cte_write), Some(114));
+
+        let select = serde_json::json!([{ "Plan": { "Node Type": "Seq Scan", "Plan Rows": 7 } }]);
+        assert_eq!(plan_rows(&select), Some(7));
+        assert_eq!(plan_rows(&serde_json::json!({})), None);
+    }
+
+    /// Live check of the same thing: a write touching more rows than the
+    /// `public.*` allow rule's cap must prompt, not auto-run.
+    #[tokio::test]
+    async fn large_public_write_is_estimated_and_prompts() {
+        let Some(mut h) = setup().await else { return };
+        // `public` is the allow rule's schema, so the table has to live there.
+        let table = format!("public.it_{}", uuid::Uuid::new_v4().simple());
+        sqlx::raw_sql(&format!(
+            "CREATE TABLE {table} (n int); INSERT INTO {table} SELECT generate_series(1, 2000); ANALYZE {table}"
+        ))
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        let est = estimate_rows(&h.pool, &format!("UPDATE {table} SET n = n")).await;
+
+        let core = h.core.clone();
+        let sql = format!("UPDATE {table} SET n = n");
+        let handle = tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql, None).await });
+        let id = tokio::time::timeout(Duration::from_secs(5), h.next_request_id("permission_required")).await;
+        if let Ok(id) = &id {
+            h.core.pending_permissions.resolve(id, PermissionVerdict::Deny).await.unwrap();
+        }
+        let r = handle.await.unwrap();
+        let _ = sqlx::query(&format!("DROP TABLE {table}")).execute(&h.pool).await;
+        h.drop_schema().await;
+
+        assert!(est.is_some_and(|n| n >= 1000), "estimate must reflect the scan, got {est:?}");
+        assert!(id.is_ok(), "a 2000-row public write must prompt");
+        r.expect_err("denied");
     }
 
     // ── Phase 2: re-gate human-edited (Modified) SQL ─────────────────────
