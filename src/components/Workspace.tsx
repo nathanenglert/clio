@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Connection } from "../lib/api";
+import { type Connection, type QueryResult } from "../lib/api";
 import { Splitter } from "./Splitter";
 import { TabBar } from "./TabBar";
 import { SqlEditor, type SqlEditorHandle } from "./SqlEditor";
@@ -16,6 +16,26 @@ import type { Intellisense } from "../lib/useIntellisense";
 import type { Snippets } from "../lib/useSnippets";
 
 type TabMode = "data" | "structure";
+
+const WRITE_VERBS: Record<string, string> = {
+  insert: "inserted",
+  update: "updated",
+  delete: "deleted",
+  merge: "merged",
+};
+
+/** Footer count. A write returns no rows (unless RETURNING), so for one we
+ *  report how many rows it touched — "3 rows updated", not "0 rows". */
+function resultCountLabel(result: QueryResult, sql: string): string {
+  const firstWord = sql
+    .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, " ")
+    .trim()
+    .split(/\s+/)[0]
+    ?.toLowerCase();
+  const verb = firstWord ? WRITE_VERBS[firstWord] : undefined;
+  const n = verb && result.rows_affected != null ? result.rows_affected : result.row_count;
+  return `${n} row${n === 1 ? "" : "s"}${verb && result.rows_affected != null ? ` ${verb}` : ""}`;
+}
 
 type Props = {
   active: Connection | null;
@@ -132,10 +152,14 @@ export function Workspace({
   const tableDescription =
     isTableTab && schema && table ? editing.getTableMeta(schema, table) : null;
 
+  // Depend on `ensureMeta`, not `editing`: the hook returns a new object every
+  // render, and each describe_table emits an activity event that re-renders,
+  // so a failing fetch would otherwise retry in a tight loop.
+  const { ensureMeta } = editing;
   useEffect(() => {
     if (!isTableTab || !schema || !table) return;
-    editing.ensureMeta(schema, table);
-  }, [isTableTab, schema, table, editing]);
+    ensureMeta(schema, table);
+  }, [isTableTab, schema, table, ensureMeta]);
 
   // Close the JSON sidebar when the tab switches — the target row index no
   // longer maps to anything meaningful in the new result.
@@ -364,7 +388,7 @@ export function Workspace({
         {result ? (
           <>
             <span className="status-pill ok mono">
-              {result.row_count} row{result.row_count === 1 ? "" : "s"} · {result.elapsed_ms}ms
+              {resultCountLabel(result, activeTab?.sql ?? "")} · {result.elapsed_ms}ms
               {result.truncated && " · truncated"}
             </span>
             <span className="result-sep">│</span>
@@ -419,6 +443,7 @@ export function Workspace({
         <ResultsGrid
           result={result}
           error={error}
+          countLabel={result ? resultCountLabel(result, activeTab?.sql ?? "") : undefined}
           editable={editable}
           readOnlyReason={
             !active.connected

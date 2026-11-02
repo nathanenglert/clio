@@ -28,11 +28,20 @@ mod secret_store {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
+    // Tests get a private in-memory store, so `cargo test` never reads or
+    // writes the developer's real dev-secrets.json.
+    #[cfg(test)]
+    static TEST_STORE: std::sync::Mutex<Option<HashMap<String, String>>> =
+        std::sync::Mutex::new(None);
+
     fn store_path() -> Result<PathBuf> {
         Ok(app_data_dir()?.join("dev-secrets.json"))
     }
 
     fn load() -> Result<HashMap<String, String>> {
+        #[cfg(test)]
+        return Ok(TEST_STORE.lock().unwrap().clone().unwrap_or_default());
+        #[allow(unreachable_code)]
         let path = store_path()?;
         if !path.exists() {
             return Ok(HashMap::new());
@@ -42,6 +51,12 @@ mod secret_store {
     }
 
     fn save(map: &HashMap<String, String>) -> Result<()> {
+        #[cfg(test)]
+        {
+            *TEST_STORE.lock().unwrap() = Some(map.clone());
+            return Ok(());
+        }
+        #[allow(unreachable_code)]
         let path = store_path()?;
         let bytes = serde_json::to_vec_pretty(map)?;
         std::fs::write(&path, bytes).with_context(|| format!("write {:?}", path))?;

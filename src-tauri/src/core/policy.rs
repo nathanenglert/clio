@@ -43,6 +43,9 @@ pub enum StmtKind {
     CreateOther,
     AlterTable,
     AlterOther,
+    /// `DO $$ … $$` — an anonymous code block. It can run anything, so it is
+    /// never allowed without a prompt.
+    Do,
     Other,
 }
 
@@ -63,6 +66,7 @@ impl StmtKind {
             | StmtKind::CreateOther
             | StmtKind::AlterTable
             | StmtKind::AlterOther
+            | StmtKind::Do
             | StmtKind::Other => OpKind::Ddl,
         }
     }
@@ -89,7 +93,8 @@ pub struct StmtInfo {
     /// If the outer statement is a Query but a CTE inside it writes, this
     /// promotes the classification to the most restrictive kind found.
     /// E.g. `WITH x AS (DELETE FROM leads ...) SELECT * FROM x` parses as
-    /// `Delete` here, not `Select`.
+    /// `Delete` here, not `Select`. `SELECT … INTO` sets it too (as
+    /// `CreateTable`).
     pub cte_writes: bool,
 }
 
@@ -136,6 +141,10 @@ impl TargetPattern {
 
     fn matches(&self, target: &Target) -> bool {
         self.schema.matches(target.schema.as_deref()) && self.name.matches(Some(&target.name))
+    }
+
+    fn is_any(&self) -> bool {
+        matches!((&self.schema, &self.name), (PatternPart::Any, PatternPart::Any))
     }
 }
 
@@ -196,12 +205,63 @@ pub fn parse_sql(sql: &str) -> Result<Vec<StmtInfo>, String> {
     if trimmed.is_empty() {
         return Err("empty query".into());
     }
+    if let Some(info) = parse_do_block(trimmed)? {
+        return Ok(vec![info]);
+    }
     let dialect = PostgreSqlDialect {};
     let stmts = Parser::parse_sql(&dialect, trimmed).map_err(|e| format!("parse error: {e}"))?;
     if stmts.is_empty() {
         return Err("no statements parsed".into());
     }
     Ok(stmts.iter().map(stmt_info).collect())
+}
+
+/// Recognize `DO [LANGUAGE l] <string> [LANGUAGE l] [;]`, Postgres's anonymous
+/// code block, which sqlparser doesn't parse. Returns `Ok(None)` when `sql`
+/// doesn't start with `DO`. A DO block must be the whole input, so one approval
+/// can't carry extra statements along with it.
+fn parse_do_block(sql: &str) -> Result<Option<StmtInfo>, String> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let dialect = PostgreSqlDialect {};
+    let tokens = match Tokenizer::new(&dialect, sql).tokenize() {
+        Ok(t) => t,
+        Err(_) => return Ok(None), // let the parser report it
+    };
+    let mut it = tokens.into_iter().filter(|t| !matches!(t, Token::Whitespace(_)));
+    match it.next() {
+        Some(Token::Word(w)) if w.value.eq_ignore_ascii_case("do") => {}
+        _ => return Ok(None),
+    }
+    let malformed = || "parse error: expected DO [LANGUAGE name] '<code>' as a single statement".to_string();
+    let (mut body, mut language, mut ended) = (false, false, false);
+    while let Some(t) = it.next() {
+        match t {
+            _ if ended => return Err("a DO block must be the only statement".into()),
+            Token::SemiColon => ended = true,
+            Token::DollarQuotedString(_)
+            | Token::SingleQuotedString(_)
+            | Token::EscapedStringLiteral(_)
+                if !body =>
+            {
+                body = true
+            }
+            Token::Word(w) if w.value.eq_ignore_ascii_case("language") && !language => {
+                match it.next() {
+                    Some(Token::Word(_)) | Some(Token::SingleQuotedString(_)) => language = true,
+                    _ => return Err(malformed()),
+                }
+            }
+            _ => return Err(malformed()),
+        }
+    }
+    if !body {
+        return Err(malformed());
+    }
+    Ok(Some(StmtInfo {
+        kind: StmtKind::Do,
+        targets: Vec::new(),
+        cte_writes: false,
+    }))
 }
 
 fn stmt_info(stmt: &Statement) -> StmtInfo {
@@ -360,6 +420,8 @@ fn set_expr_max_kind(s: &SetExpr) -> Option<StmtKind> {
                 (None, None) => None,
             }
         }
+        // `SELECT … INTO t` creates and fills a table: DDL, not a read.
+        SetExpr::Select(sel) if sel.into.is_some() => Some(StmtKind::CreateTable),
         SetExpr::Select(_) | SetExpr::Values(_) | SetExpr::Table(_) => None,
     }
 }
@@ -429,8 +491,15 @@ pub fn evaluate(rules: &[Rule], stmt: &StmtInfo, row_estimate: Option<u64>) -> V
             }
         }
         // Target match. If the statement has no targets (e.g. SELECT), the
-        // rule matches by default — read rules don't filter on targets.
-        if !stmt.targets.is_empty() {
+        // rule matches by default — read rules don't filter on targets. A
+        // non-read with no known target (a data-modifying CTE) can't be shown
+        // to hit a target-scoped rule like `public.*`, so only target-agnostic
+        // rules may match it.
+        if stmt.targets.is_empty() {
+            if stmt.kind.op_kind() != OpKind::Read && !rule.target.is_any() {
+                continue;
+            }
+        } else {
             let matches = stmt.targets.iter().all(|t| rule.target.matches(t));
             if !matches {
                 continue;
@@ -460,10 +529,11 @@ pub fn evaluate(rules: &[Rule], stmt: &StmtInfo, row_estimate: Option<u64>) -> V
 /// 1. `DROP TABLE` / `DROP SCHEMA` → **block**
 /// 2. `DELETE`/`TRUNCATE`/other-`DROP` → **prompt** (destructive)
 /// 3. `CREATE`/`ALTER` → **prompt** (schema change)
-/// 4. `INSERT`/`UPDATE` on `audit.*` / `reporting.*` → **prompt**
-/// 5. `INSERT`/`UPDATE` on `public.*` with row estimate ≤ 1000 → **allow**
-/// 6. `INSERT`/`UPDATE` (catch-all) → **prompt**
-/// 7. `SELECT` → **allow**
+/// 4. `DO` code block → **prompt**
+/// 5. `INSERT`/`UPDATE` on `audit.*` / `reporting.*` → **prompt**
+/// 6. `INSERT`/`UPDATE` on `public.*` with row estimate ≤ 1000 → **allow**
+/// 7. `INSERT`/`UPDATE` (catch-all) → **prompt**
+/// 8. `SELECT` → **allow**
 pub fn default_rules() -> Vec<Rule> {
     vec![
         Rule {
@@ -495,6 +565,13 @@ pub fn default_rules() -> Vec<Rule> {
             max_rows: None,
             verdict: VerdictKind::Prompt,
             label: "Schema change — prompt with diff".into(),
+        },
+        Rule {
+            stmt_kinds: vec![StmtKind::Do],
+            target: TargetPattern::any(),
+            max_rows: None,
+            verdict: VerdictKind::Prompt,
+            label: "Code block (DO) — prompt".into(),
         },
         Rule {
             stmt_kinds: vec![StmtKind::Insert, StmtKind::Update],
@@ -559,6 +636,43 @@ mod tests {
     }
 
     #[test]
+    fn select_into_is_create_table_and_prompts() {
+        // `SELECT … INTO` creates a table from the result; it must not ride the
+        // Read allow rule.
+        for sql in [
+            "SELECT mrn, ssn INTO TABLE public.zz_exfil FROM clinical.patients",
+            "SELECT * INTO zz FROM patients",
+            "WITH p AS (SELECT ssn FROM patients) SELECT * INTO zz FROM p",
+        ] {
+            let s = parse_one(sql);
+            assert_eq!(s.kind, StmtKind::CreateTable, "{sql}");
+            assert!(matches!(evaluate(&rules(), &s, None), Verdict::Prompt { .. }), "{sql}");
+        }
+    }
+
+    #[test]
+    fn do_block_parses_and_prompts() {
+        for sql in [
+            "DO $$ BEGIN RAISE NOTICE 'hi'; END $$;",
+            "do $body$ begin perform 1; end $body$",
+            "DO LANGUAGE plpgsql $$ BEGIN NULL; END $$",
+            "DO $$ BEGIN NULL; END $$ LANGUAGE plpgsql;",
+            "-- note\nDO 'BEGIN NULL; END'",
+        ] {
+            let s = parse_one(sql);
+            assert_eq!(s.kind, StmtKind::Do, "{sql}");
+            match evaluate(&rules(), &s, None) {
+                Verdict::Prompt { rule, .. } => assert_eq!(rule, "Code block (DO) — prompt"),
+                v => panic!("expected Prompt for {sql}, got {v:?}"),
+            }
+        }
+        // A DO block can't smuggle a second statement past one approval.
+        assert!(parse_sql("DO $$ BEGIN NULL; END $$; DROP TABLE users").is_err());
+        assert!(parse_sql("DO").is_err());
+        assert!(parse_sql("DO $$ x $$ $$ y $$").is_err());
+    }
+
+    #[test]
     fn cte_select_is_allowed() {
         let s = parse_one("WITH x AS (SELECT 1 AS n) SELECT * FROM x");
         assert_eq!(s.kind, StmtKind::Select);
@@ -575,6 +689,21 @@ mod tests {
         match evaluate(&rules(), &s, Some(1)) {
             Verdict::Allow { rule } => assert_eq!(rule, "Write to public.* (≤1000 rows)"),
             v => panic!("expected Allow, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn cte_write_without_targets_skips_scoped_rules() {
+        // The CTE write has no parsed target, so it must not ride the
+        // `public.*` allow rule (or match `audit.*` by accident).
+        let s = parse_one(
+            "WITH x AS (UPDATE billing.invoices SET paid_cents = 0 RETURNING 1) SELECT count(*) FROM x",
+        );
+        assert_eq!(s.kind, StmtKind::Update);
+        assert!(s.targets.is_empty());
+        match evaluate(&rules(), &s, Some(1)) {
+            Verdict::Prompt { rule, .. } => assert_eq!(rule, "Write — prompt"),
+            v => panic!("expected the catch-all Prompt, got {v:?}"),
         }
     }
 
