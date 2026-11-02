@@ -432,6 +432,12 @@ async fn run_migration_with_gate(
         final_sqls.push(final_sql);
     }
 
+    // The prompts above can take arbitrarily long. Re-acquire through the
+    // registry seam so authority is re-checked at the point of use: if the
+    // human disconnected meanwhile, this fails closed with "not connected"
+    // rather than relying on the captured handle having been closed.
+    let pool = core.pool(conn).await?;
+
     // Whether this connection redacts — governs error-message sanitization for
     // the statements about to run. A failed write can echo real classified
     // values in its DB error (e.g. a unique-violation `Key (email)=(real@x.com)
@@ -987,6 +993,33 @@ mod tests {
         r.expect_err("a denied deviation must abort the migration");
         assert!(!a, "stmt a must not be left committed after the deny");
         assert!(!b, "stmt b was denied");
+    }
+
+    /// R1 per-use authority: a human who disconnects while a migration card is
+    /// pending must stop the run at the registry seam, before any statement.
+    #[tokio::test]
+    async fn migration_rechecks_connection_after_prompts() {
+        let Some(mut h) = setup().await else { return };
+        // A registry pool of its own, so dropping it leaves the harness pool open.
+        let own = PgPoolOptions::new().max_connections(2).connect(&test_db_url()).await.unwrap();
+        h.core.pools.insert_for_test(TEST_CONN, own, true).await;
+
+        let core = h.core.clone();
+        let stmts = vec![format!("CREATE TABLE {}.a (id int)", h.schema)];
+        let handle =
+            tokio::spawn(async move { execute_migration(&core, TEST_CONN, stmts, None).await });
+        h.approve_migration(false).await;
+        let card = h.next_request_id("permission_required").await;
+        h.core.pools.drop_pool(TEST_CONN).await; // the human disconnects mid-prompt
+        h.core.pending_permissions.resolve(&card, PermissionVerdict::Allow).await.unwrap();
+
+        let r = handle.await.unwrap();
+        let a = h.table_exists("a").await;
+        h.drop_schema().await;
+
+        let e = format!("{:#}", r.expect_err("a disconnected migration must not run"));
+        assert!(e.contains("not connected"), "expected the registry to refuse, got: {e}");
+        assert!(!a, "no statement may run after the disconnect");
     }
 
     /// Happy path: every deviation approved, transaction-wrapped — the batch
