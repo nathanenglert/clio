@@ -231,6 +231,7 @@ pub(super) async fn run_decoded(
     };
 
     let classified = redactor_view.is_some();
+    reject_untraceable(core, classified, sql)?;
     // Should result columns Postgres left *untagged* (derived expressions over
     // classified columns) be redacted? Only meaningful on a classified
     // connection; see core::lineage.
@@ -364,6 +365,24 @@ pub(super) async fn run_decoded(
     })
 }
 
+
+/// On the **agent path** and a **classified connection**, refuse SQL whose
+/// output lineage can't trace: a function that runs SQL from a string
+/// (`query_to_xml('select ssn …')`) or a catalog of sampled column values
+/// (`pg_stats.most_common_vals`). Either returns real classified values with
+/// no classified relation or column in the statement for redaction to key on.
+pub(super) fn reject_untraceable(core: &Core, classified: bool, sql: &str) -> Result<()> {
+    if !classified || !matches!(core.pool_access, crate::pool::PoolAccess::Agent) {
+        return Ok(());
+    }
+    match lineage::untraceable_reference(sql) {
+        Some(name) => Err(anyhow!(
+            "'{name}' is not available to agents on a connection with redaction enabled: \
+             it can return classified values that redaction can't trace"
+        )),
+        None => Ok(()),
+    }
+}
 
 /// Run `sql` inside a `READ ONLY` transaction that is always rolled back.
 async fn fetch_read_only(

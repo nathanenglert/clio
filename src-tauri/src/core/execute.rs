@@ -25,7 +25,7 @@ use super::permission::{
 };
 use super::lineage;
 use super::policy::{self, OpKind, StmtInfo, StmtKind, Verdict};
-use super::query::{cap_payload, run_decoded, sanitize_db_error};
+use super::query::{cap_payload, reject_untraceable, run_decoded, sanitize_db_error};
 use super::Core;
 
 pub async fn execute_statement(
@@ -85,18 +85,23 @@ async fn run_with_gate(
     let rules = policy::default_rules();
     let verdict = policy::evaluate(&rules, &stmt, estimate);
 
+    let view = {
+        let connection = crate::connections::get(&core.meta, conn).await?;
+        core.redactor_cache
+            .view_for(&core.meta, &pool, conn, &connection.id)
+            .await?
+    };
+    // Refuse untraceable SQL before asking the human anything: `run_decoded`
+    // would refuse it after their approval anyway.
+    reject_untraceable(core, view.is_some(), sql)?;
+
     // A write that touches a classified table can copy classified values
     // somewhere unredacted — into an unclassified column or table, or back out
     // through RETURNING — so it never rides a row-bounded allow rule.
     let verdict = match verdict {
         Verdict::Allow { .. } if stmt.kind.op_kind() != OpKind::Read => {
-            let connection = crate::connections::get(&core.meta, conn).await?;
-            let view = core
-                .redactor_cache
-                .view_for(&core.meta, &pool, conn, &connection.id)
-                .await?;
-            match view {
-                Some(v) if lineage::references_classified_table(sql, &v) => Verdict::Prompt {
+            match &view {
+                Some(v) if lineage::references_classified_table(sql, v) => Verdict::Prompt {
                     rule: "Write touching classified data — prompt".into(),
                     reason: "This write reads or modifies a table with classified \
                              (PHI/PCI/PII) columns, so it could copy their values somewhere \
@@ -1126,6 +1131,35 @@ mod tests {
         assert_eq!(agg.rows[0][0].as_deref(), Some("1"), "count(*) must not be redacted");
 
         h.drop_schema().await;
+    }
+
+    /// SQL run from a string, and sampled-value catalogs, reach classified
+    /// values with nothing in the statement for redaction to key on. On a
+    /// classified connection the agent is refused them outright.
+    #[tokio::test]
+    async fn untraceable_sql_is_refused_on_classified_connection() {
+        let Some(h) = setup().await else { return };
+        let real = setup_classified_patients(&h).await;
+        let xml = format!(
+            "SELECT query_to_xml('select ssn from {}.patients', true, false, '')",
+            h.schema
+        );
+        let via_gate = execute_statement(&h.core, TEST_CONN, &xml, None).await;
+        let via_query = crate::core::run_query(&h.core, TEST_CONN, &xml, false).await;
+        let stats = crate::core::run_query(
+            &h.core,
+            TEST_CONN,
+            "SELECT most_common_vals::text FROM pg_stats WHERE attname = 'ssn'",
+            false,
+        )
+        .await;
+        h.drop_schema().await;
+
+        for r in [via_gate, via_query, stats] {
+            let e = format!("{:#}", r.expect_err("must be refused"));
+            assert!(e.contains("not available to agents"), "got: {e}");
+            assert!(!e.contains(real.as_str()));
+        }
     }
 
     #[tokio::test]

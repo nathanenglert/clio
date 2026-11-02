@@ -89,6 +89,105 @@ pub(super) fn should_redact_derived(sql: &str, view: &RedactorView) -> bool {
     }
 }
 
+/// Functions that run SQL handed to them as a string (or over another
+/// connection), so the relations they read never appear in the AST that
+/// lineage analyzes.
+const SQL_EXECUTING_FUNCTIONS: &[&str] = &[
+    "query_to_xml",
+    "query_to_xmlschema",
+    "query_to_xml_and_xmlschema",
+    "cursor_to_xml",
+    "cursor_to_xmlschema",
+    "table_to_xml",
+    "table_to_xmlschema",
+    "table_to_xml_and_xmlschema",
+    "schema_to_xml",
+    "schema_to_xmlschema",
+    "schema_to_xml_and_xmlschema",
+    "database_to_xml",
+    "database_to_xmlschema",
+    "database_to_xml_and_xmlschema",
+    "ts_stat",
+    "dblink",
+    "dblink_exec",
+    "dblink_open",
+    "dblink_fetch",
+    "dblink_send_query",
+    "dblink_get_result",
+];
+
+/// Catalogs that store sampled column values (most-common values, histogram
+/// bounds) for every column, classified or not.
+const VALUE_SAMPLING_CATALOGS: &[&str] = &[
+    "pg_stats",
+    "pg_stats_ext",
+    "pg_stats_ext_exprs",
+    "pg_statistic",
+    "pg_statistic_ext_data",
+];
+
+/// The first function or relation in `sql` whose output lineage can't trace —
+/// a SQL-executing function or a value-sampling catalog — if any. Matches
+/// parsed names, not raw text; unparseable SQL falls back to a text match so
+/// it only ever over-reports. This is a blocklist: it closes the known
+/// channels, not every possible one.
+pub(super) fn untraceable_reference(sql: &str) -> Option<&'static str> {
+    struct Finder(Option<&'static str>);
+    impl Finder {
+        fn check(&mut self, name: &ObjectName) -> ControlFlow<()> {
+            let Some(n) = last_ident(name) else {
+                return ControlFlow::Continue(());
+            };
+            match SQL_EXECUTING_FUNCTIONS
+                .iter()
+                .chain(VALUE_SAMPLING_CATALOGS)
+                .find(|b| **b == n)
+            {
+                Some(hit) => {
+                    self.0 = Some(hit);
+                    ControlFlow::Break(())
+                }
+                None => ControlFlow::Continue(()),
+            }
+        }
+    }
+    impl Visitor for Finder {
+        type Break = ();
+        fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<()> {
+            self.check(relation)
+        }
+        fn pre_visit_table_factor(&mut self, tf: &TableFactor) -> ControlFlow<()> {
+            match tf {
+                TableFactor::Function { name, .. } => self.check(name),
+                _ => ControlFlow::Continue(()),
+            }
+        }
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            match expr {
+                Expr::Function(f) => self.check(&f.name),
+                _ => ControlFlow::Continue(()),
+            }
+        }
+    }
+
+    let dialect = PostgreSqlDialect {};
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(stmts) => {
+            let mut f = Finder(None);
+            let _ = stmts.visit(&mut f);
+            f.0
+        }
+        Err(_) => {
+            let lower = sql.to_ascii_lowercase();
+            SQL_EXECUTING_FUNCTIONS
+                .iter()
+                .chain(VALUE_SAMPLING_CATALOGS)
+                .find(|b| lower.contains(**b))
+                .copied()
+        }
+    }
+}
+
 /// Whether `sql` touches any classified table — read, joined, written, or
 /// referenced in a subquery. Unparseable SQL falls back to a text match, so
 /// this only ever over-reports. Used to keep a write that could copy classified
@@ -556,6 +655,25 @@ mod tests {
         }
         assert!(!references_classified_table("UPDATE public.leads SET status = 'x'", &v));
         assert!(!references_classified_table("INSERT INTO public.t VALUES (1)", &v));
+    }
+
+    #[test]
+    fn finds_sql_executing_functions_and_sampling_catalogs() {
+        for (sql, hit) in [
+            ("SELECT query_to_xml('select ssn from patients', true, false, '')", "query_to_xml"),
+            ("SELECT pg_catalog.table_to_xml('patients'::regclass, true, false, '')", "table_to_xml"),
+            ("SELECT * FROM ts_stat('select tsv from notes')", "ts_stat"),
+            ("SELECT most_common_vals FROM pg_stats WHERE attname = 'ssn'", "pg_stats"),
+            ("SELECT n FROM (SELECT 1 n) x JOIN pg_catalog.pg_statistic s ON true", "pg_statistic"),
+            ("INSERT INTO t SELECT schema_to_xml('clinical', true, false, '')", "schema_to_xml"),
+            // Unparseable SQL still gets caught by the text fallback.
+            ("SELECT query_to_xml('x' FROM", "query_to_xml"),
+        ] {
+            assert_eq!(untraceable_reference(sql), Some(hit), "{sql}");
+        }
+        assert_eq!(untraceable_reference("SELECT xmlelement(name a, 'b')"), None);
+        assert_eq!(untraceable_reference("SELECT * FROM pg_stat_user_tables"), None);
+        assert_eq!(untraceable_reference("SELECT count(*) FROM patients"), None);
     }
 
     #[test]
