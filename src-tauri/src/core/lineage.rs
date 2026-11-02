@@ -28,8 +28,8 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Expr, ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Statement, TableFactor,
-    TableObject, TableWithJoins, Visit, Visitor,
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName, ObjectNamePart, Query,
+    SelectItem, SetExpr, Statement, TableFactor, TableObject, TableWithJoins, Visit, Visitor,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -71,6 +71,12 @@ pub(super) fn should_redact_derived(sql: &str, view: &RedactorView) -> bool {
     // queries that don't touch a classified table.
     if !tables.iter().any(|t| view.by_name.contains_key(t)) {
         return false;
+    }
+
+    // A column-alias list (`FROM patients AS p(a, b, …)`) renames classified
+    // columns, so the name matching below can't see them — fail closed.
+    if classified_table_renames_columns(stmt, view) {
+        return true;
     }
 
     match stmt {
@@ -121,11 +127,49 @@ fn query_exposes_sensitive(q: &Query, tables: &HashSet<String>, view: &RedactorV
 
     let sources: Vec<&TableWithJoins> = select.from.iter().collect();
     let (sensitive_cols, sensitive_table_refs) = build_scope(tables, &sources, view);
-    select
+    // `SELECT p FROM patients p` projects the whole row as one untagged record
+    // column — bare in syntax, but derived in effect.
+    let whole_row = select
         .projection
         .iter()
-        .filter_map(derived_expr)
-        .any(|e| expr_is_sensitive(e, &sensitive_cols, &sensitive_table_refs))
+        .any(|item| bare_ident(item).is_some_and(|n| sensitive_table_refs.contains(&n)));
+    whole_row
+        || select
+            .projection
+            .iter()
+            .filter_map(derived_expr)
+            .any(|e| expr_is_sensitive(e, &sensitive_cols, &sensitive_table_refs))
+}
+
+/// The lowercased name of a projection item that is a lone unqualified
+/// identifier (`SELECT p`), if it is one.
+fn bare_ident(item: &SelectItem) -> Option<String> {
+    let e = match item {
+        SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => e,
+        _ => return None,
+    };
+    match unwrap_nested(e) {
+        Expr::Identifier(i) => Some(i.value.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// Whether any classified table in `stmt` carries a column-alias list.
+fn classified_table_renames_columns(stmt: &Statement, view: &RedactorView) -> bool {
+    struct Finder<'a>(&'a RedactorView);
+    impl Visitor for Finder<'_> {
+        type Break = ();
+        fn pre_visit_table_factor(&mut self, tf: &TableFactor) -> ControlFlow<()> {
+            if let TableFactor::Table { name, alias: Some(alias), .. } = tf {
+                let classified = last_ident(name).is_some_and(|t| self.0.by_name.contains_key(&t));
+                if classified && !alias.columns.is_empty() {
+                    return ControlFlow::Break(());
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    stmt.visit(&mut Finder(view)).is_break()
 }
 
 /// `INSERT/UPDATE/DELETE … RETURNING <exprs>` analysis. Same lineage rule as a
@@ -309,6 +353,13 @@ struct SensitiveExprVisitor<'a> {
     sensitive_table_refs: &'a HashSet<String>,
 }
 
+impl SensitiveExprVisitor<'_> {
+    /// `name.*` where `name` is a classified table or its alias.
+    fn is_sensitive_row(&self, name: &ObjectName) -> bool {
+        last_ident(name).is_some_and(|n| self.sensitive_table_refs.contains(&n))
+    }
+}
+
 impl Visitor for SensitiveExprVisitor<'_> {
     type Break = ();
 
@@ -327,6 +378,29 @@ impl Visitor for SensitiveExprVisitor<'_> {
             Expr::CompoundIdentifier(parts) => {
                 if let Some(last) = parts.last() {
                     if self.sensitive_cols.contains(&last.value.to_ascii_lowercase()) {
+                        return ControlFlow::Break(());
+                    }
+                }
+            }
+            // `p.*` as an expression (`(p.*)::text`) is the whole row.
+            Expr::QualifiedWildcard(name, _) => {
+                if self.is_sensitive_row(name) {
+                    return ControlFlow::Break(());
+                }
+            }
+            // `to_jsonb(p.*)`: a wildcard argument is a `FunctionArgExpr`, not
+            // an `Expr`, so the walk never reaches it on its own.
+            Expr::Function(f) => {
+                if let FunctionArguments::List(list) = &f.args {
+                    let row_arg = list.args.iter().any(|a| match a {
+                        FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(n))
+                        | FunctionArg::Named { arg: FunctionArgExpr::QualifiedWildcard(n), .. }
+                        | FunctionArg::ExprNamed { arg: FunctionArgExpr::QualifiedWildcard(n), .. } => {
+                            self.is_sensitive_row(n)
+                        }
+                        _ => false,
+                    });
+                    if row_arg {
                         return ControlFlow::Break(());
                     }
                 }
@@ -397,6 +471,32 @@ mod tests {
     fn redacts_whole_row_reference() {
         assert!(redacts("SELECT to_jsonb(p) FROM patients p", PATIENTS));
         assert!(redacts("SELECT row_to_json(patients) FROM patients", PATIENTS));
+    }
+
+    #[test]
+    fn redacts_through_column_alias_lists() {
+        // `p(x1, x2, x3)` renames ssn/email out from under name matching.
+        assert!(redacts(
+            "SELECT x2||'' FROM clinical.patients AS p(x1, x2, x3)",
+            PATIENTS
+        ));
+        assert!(redacts(
+            "SELECT lower(e) FROM orders o JOIN patients p(i, s, e) ON true",
+            PATIENTS
+        ));
+        // An alias list on an unclassified table changes nothing.
+        assert!(!redacts("SELECT upper(c) FROM warehouses w(c)", PATIENTS));
+    }
+
+    #[test]
+    fn redacts_qualified_wildcard_row_references() {
+        assert!(redacts("SELECT to_jsonb(p.*) FROM clinical.patients p", PATIENTS));
+        assert!(redacts("SELECT row_to_json(patients.*) FROM patients", PATIENTS));
+        assert!(redacts("SELECT (p.*)::text FROM patients p", PATIENTS));
+        assert!(redacts("SELECT p FROM patients p", PATIENTS));
+        // `count(*)` is a plain wildcard argument, not a row.
+        assert!(!redacts("SELECT count(*) FROM patients p", PATIENTS));
+        assert!(!redacts("SELECT to_jsonb(w.*) FROM warehouses w", PATIENTS));
     }
 
     #[test]
