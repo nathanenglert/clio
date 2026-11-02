@@ -453,6 +453,7 @@ export function ResultsGrid(props: Props) {
                   const boxShadow = cellBoxShadow(edges, dirty);
                   const cls = [
                     isNull ? "null" : "",
+                    col.redacted && !isNull ? "redacted" : "",
                     isJson ? "json" : "",
                     dirty ? "dirty" : "",
                     highlighted ? "cell-selected" : "",

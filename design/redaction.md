@@ -267,8 +267,10 @@ in the cell; we do not show both.
 ```
 
 - The column header gains the `◌` glyph in `--privacy`, left of the column name.
-- Cell values render in the same mono/size as normal. **No per-cell glyph** — that
-  would be too noisy at 100k rows. The header glyph carries the signal for the column.
+- Cell values render in the same mono/size as normal, but **italic in `--privacy`**, so
+  a faked value never reads as a real one (fakes were repeatedly mistaken for real
+  data). **No per-cell glyph** — that would be too noisy at 100k rows. The header glyph
+  carries the signal for the column.
 - A faint `--privacy-soft` 1px right-edge stripe inside redacted column cells gives a
   peripheral hint without adding chrome to each cell. Off by default if the user finds
   it noisy — single setting in the View menu (`View > Highlight redacted columns`).

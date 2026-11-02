@@ -2317,6 +2317,12 @@ body.dragging-y * { cursor: inherit !important; }
   margin-right: -4px;     /* tighten against the column name */
   font-feature-settings: 'tnum';
 }
+/* Faked values in redacted columns: italic in the privacy tint, so a fake is
+   never mistaken for a real value. */
+.grid td.redacted {
+  font-style: italic;
+  color: var(--privacy);
+}
 .grid thead th.col-redacted {
   /* Faint slate wash so the header is unmistakable at a glance. */
   background: linear-gradient(
