@@ -378,10 +378,10 @@ async fn run_migration_with_gate(
         }
     };
 
-    // Acquire the pool up front (just an Arc clone — holds no locks) so we
-    // fail fast if the connection is gone. The transaction is NOT opened yet:
-    // we resolve every verdict first.
-    let pool = core.pool(conn).await?;
+    // Check the connection up front so we fail fast if it's gone, before
+    // prompting. Phase B re-acquires the pool after the prompts. The
+    // transaction is NOT opened yet: we resolve every verdict first.
+    core.pool(conn).await?;
 
     // ── Phase A: resolve every statement to its final SQL, before any DB
     // work. A deviation pauses for the standard single-statement card. A Deny
@@ -529,6 +529,7 @@ fn stmt_kind_str(k: StmtKind) -> &'static str {
         StmtKind::CreateOther => "create_other",
         StmtKind::AlterTable => "alter_table",
         StmtKind::AlterOther => "alter_other",
+        StmtKind::Do => "do",
         StmtKind::Other => "other",
     }
 }
