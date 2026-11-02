@@ -83,6 +83,21 @@ pub(super) fn should_redact_derived(sql: &str, view: &RedactorView) -> bool {
     }
 }
 
+/// Whether `sql` touches any classified table — read, joined, written, or
+/// referenced in a subquery. Unparseable SQL falls back to a text match, so
+/// this only ever over-reports. Used to keep a write that could copy classified
+/// values into an unclassified place (`INSERT INTO public.t SELECT ssn …`) from
+/// riding a row-bounded allow rule.
+pub(super) fn references_classified_table(sql: &str, view: &RedactorView) -> bool {
+    let dialect = PostgreSqlDialect {};
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(stmts) => stmts
+            .iter()
+            .any(|s| statement_tables(s).iter().any(|t| view.by_name.contains_key(t))),
+        Err(_) => sql_mentions_classified_table(sql, view),
+    }
+}
+
 /// SELECT analysis. Fails closed on CTEs, set operations, and non-plain FROM
 /// factors (subqueries/derived tables/table functions), because those surface
 /// values whose lineage we can't trace to a projection expression.
@@ -425,6 +440,22 @@ mod tests {
             "SELECT * FROM (SELECT n FROM widgets) x",
             PATIENTS
         ));
+    }
+
+    #[test]
+    fn detects_writes_that_touch_classified_tables() {
+        let v = view(PATIENTS);
+        for sql in [
+            "INSERT INTO public.audit_log (target_id) SELECT ssn FROM clinical.patients RETURNING target_id",
+            "UPDATE public.leads SET note = (SELECT email FROM patients LIMIT 1)",
+            "UPDATE patients SET notes = ssn",
+            "INSERT INTO patients (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET notes = patients.ssn",
+            "WITH c AS (SELECT ssn FROM patients) INSERT INTO public.t SELECT * FROM c",
+        ] {
+            assert!(references_classified_table(sql, &v), "{sql}");
+        }
+        assert!(!references_classified_table("UPDATE public.leads SET status = 'x'", &v));
+        assert!(!references_classified_table("INSERT INTO public.t VALUES (1)", &v));
     }
 
     #[test]

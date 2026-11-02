@@ -138,6 +138,10 @@ impl TargetPattern {
     fn matches(&self, target: &Target) -> bool {
         self.schema.matches(target.schema.as_deref()) && self.name.matches(Some(&target.name))
     }
+
+    fn is_any(&self) -> bool {
+        matches!((&self.schema, &self.name), (PatternPart::Any, PatternPart::Any))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -432,8 +436,15 @@ pub fn evaluate(rules: &[Rule], stmt: &StmtInfo, row_estimate: Option<u64>) -> V
             }
         }
         // Target match. If the statement has no targets (e.g. SELECT), the
-        // rule matches by default — read rules don't filter on targets.
-        if !stmt.targets.is_empty() {
+        // rule matches by default — read rules don't filter on targets. A
+        // non-read with no known target (a data-modifying CTE) can't be shown
+        // to hit a target-scoped rule like `public.*`, so only target-agnostic
+        // rules may match it.
+        if stmt.targets.is_empty() {
+            if stmt.kind.op_kind() != OpKind::Read && !rule.target.is_any() {
+                continue;
+            }
+        } else {
             let matches = stmt.targets.iter().all(|t| rule.target.matches(t));
             if !matches {
                 continue;
@@ -593,6 +604,21 @@ mod tests {
         match evaluate(&rules(), &s, Some(1)) {
             Verdict::Allow { rule } => assert_eq!(rule, "Write to public.* (≤1000 rows)"),
             v => panic!("expected Allow, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn cte_write_without_targets_skips_scoped_rules() {
+        // The CTE write has no parsed target, so it must not ride the
+        // `public.*` allow rule (or match `audit.*` by accident).
+        let s = parse_one(
+            "WITH x AS (UPDATE billing.invoices SET paid_cents = 0 RETURNING 1) SELECT count(*) FROM x",
+        );
+        assert_eq!(s.kind, StmtKind::Update);
+        assert!(s.targets.is_empty());
+        match evaluate(&rules(), &s, Some(1)) {
+            Verdict::Prompt { rule, .. } => assert_eq!(rule, "Write — prompt"),
+            v => panic!("expected the catch-all Prompt, got {v:?}"),
         }
     }
 

@@ -23,6 +23,7 @@ use crate::types::{ActivityEvent, QueryResult};
 use super::permission::{
     MigrationRequest, MigrationStatement, MigrationVerdict, PermissionRequest, PermissionVerdict,
 };
+use super::lineage;
 use super::policy::{self, OpKind, StmtInfo, StmtKind, Verdict};
 use super::query::{cap_payload, run_decoded, sanitize_db_error};
 use super::Core;
@@ -83,6 +84,30 @@ async fn run_with_gate(
     //    will look up per-connection rules + active session overrides.
     let rules = policy::default_rules();
     let verdict = policy::evaluate(&rules, &stmt, estimate);
+
+    // A write that touches a classified table can copy classified values
+    // somewhere unredacted — into an unclassified column or table, or back out
+    // through RETURNING — so it never rides a row-bounded allow rule.
+    let verdict = match verdict {
+        Verdict::Allow { .. } if stmt.kind.op_kind() != OpKind::Read => {
+            let connection = crate::connections::get(&core.meta, conn).await?;
+            let view = core
+                .redactor_cache
+                .view_for(&core.meta, &pool, conn, &connection.id)
+                .await?;
+            match view {
+                Some(v) if lineage::references_classified_table(sql, &v) => Verdict::Prompt {
+                    rule: "Write touching classified data — prompt".into(),
+                    reason: "This write reads or modifies a table with classified \
+                             (PHI/PCI/PII) columns, so it could copy their values somewhere \
+                             unredacted"
+                        .into(),
+                },
+                _ => verdict,
+            }
+        }
+        v => v,
+    };
 
     // 5. Branch on verdict. A read that runs with no human approval runs in a
     //    read-only transaction, so a write the classifier missed still fails.
@@ -713,6 +738,42 @@ mod tests {
 
         r.expect_err("denied");
         assert!(!copied, "SELECT INTO must not run without approval");
+    }
+
+    /// The laundering hole: a small `INSERT … SELECT … RETURNING` into
+    /// `public.*` used to auto-run under the ≤1000-row allow rule and hand the
+    /// copied classified value straight back. It must prompt instead.
+    #[tokio::test]
+    async fn write_reading_classified_table_prompts() {
+        let Some(mut h) = setup().await else { return };
+        setup_classified_patients(&h).await;
+        let table = format!("public.it_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE TABLE {table} (v text)"))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+
+        let core = h.core.clone();
+        let sql = format!(
+            "INSERT INTO {table} (v) SELECT ssn FROM {}.patients RETURNING v",
+            h.schema
+        );
+        let handle = tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql, None).await });
+        let id = tokio::time::timeout(Duration::from_secs(5), h.next_request_id("permission_required")).await;
+        if let Ok(id) = &id {
+            h.core.pending_permissions.resolve(id, PermissionVerdict::Deny).await.unwrap();
+        }
+        let r = handle.await.unwrap();
+        let copied: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        let _ = sqlx::query(&format!("DROP TABLE {table}")).execute(&h.pool).await;
+        h.drop_schema().await;
+
+        assert!(id.is_ok(), "a write reading a classified table must prompt");
+        r.expect_err("denied");
+        assert_eq!(copied, 0, "nothing may be copied without approval");
     }
 
     // ── Row estimate ─────────────────────────────────────────────────────
