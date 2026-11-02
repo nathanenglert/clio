@@ -132,10 +132,14 @@ export function Workspace({
   const tableDescription =
     isTableTab && schema && table ? editing.getTableMeta(schema, table) : null;
 
+  // Depend on `ensureMeta`, not `editing`: the hook returns a new object every
+  // render, and each describe_table emits an activity event that re-renders,
+  // so a failing fetch would otherwise retry in a tight loop.
+  const { ensureMeta } = editing;
   useEffect(() => {
     if (!isTableTab || !schema || !table) return;
-    editing.ensureMeta(schema, table);
-  }, [isTableTab, schema, table, editing]);
+    ensureMeta(schema, table);
+  }, [isTableTab, schema, table, ensureMeta]);
 
   // Close the JSON sidebar when the tab switches — the target row index no
   // longer maps to anything meaningful in the new result.

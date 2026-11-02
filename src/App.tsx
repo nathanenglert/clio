@@ -202,7 +202,10 @@ export function App() {
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
-  const editing = useEditing(activeName);
+  // Like intellisense: table metadata is only fetched for a connected
+  // connection, so a restored tab can't make describe_table calls against a
+  // disconnected one.
+  const editing = useEditing(active?.connected ? activeName : null);
   // The connection is only useful for completion once it's actually connected.
   // Passing null when disconnected keeps the schema cache from racing the
   // connect → list_schemas sequence.
@@ -581,10 +584,21 @@ export function App() {
   // ── Post-connect sensitivity toast ────────────────────────────
   // Surfaces newly-suggested classifications so the user can review them.
   // Idempotent on the backend: re-connecting an already-classified database
-  // returns new_pending: 0, which we suppress.
+  // returns new_pending: 0, which we suppress. A null outcome means the scan
+  // failed: the human can still query, but agents are refused the connection.
   const onConnected = useCallback(
     (name: string, outcome: { new_pending: number; total_classified: number } | null) => {
-      if (!outcome || outcome.new_pending === 0) return;
+      if (!outcome) {
+        showToast(
+          <span>
+            Sensitivity scan failed on <span className="mono">{name}</span>. Agents can't use
+            this connection until a reconnect scans it.
+          </span>,
+          "err",
+        );
+        return;
+      }
+      if (outcome.new_pending === 0) return;
       const n = outcome.new_pending;
       showToast(
         (

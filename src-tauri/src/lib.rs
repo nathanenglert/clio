@@ -225,8 +225,11 @@ async fn resolve_connect(
         .ok_or_else(|| format!("no pending connect request with id {id}"))?;
     // Open the pool on the human core before signalling success, so the
     // agent's follow-up queries find it connected.
+    // `connect` succeeds even when the sensitivity scan fails (the human keeps
+    // the pool); only a classified pool counts as opened for the agent.
     let opened = if approve {
         core::connect(&state, &connection).await.is_ok()
+            && state.pools.is_agent_ready(&connection).await
     } else {
         false
     };

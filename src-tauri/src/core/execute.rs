@@ -546,7 +546,7 @@ mod tests {
         .unwrap();
 
         let pools = PoolRegistry::default();
-        pools.insert_for_test(TEST_CONN, pool.clone()).await;
+        pools.insert_for_test(TEST_CONN, pool.clone(), true).await;
 
         let (tx, rx) = unbounded_channel();
         let emit: EmitFn = Arc::new(move |e| {

@@ -9,43 +9,79 @@ use tokio::sync::Mutex;
 use crate::connections;
 use crate::types::Connection;
 
-/// Who is asking for a pool. The two variants gate the *only* difference that
-/// matters for connection authority: a human-driven core may open a pool on
-/// demand; an agent-driven core may only ever use a pool a human already
-/// opened. This is the single capability that makes "a human initiates the
-/// connection" structural rather than advisory — see `Core::pool`.
+/// Who is asking for a pool. Neither variant can open one — only the explicit
+/// `connect` command does. A human-driven core may use any open pool; an
+/// agent-driven core may only use a pool a human opened *and* whose
+/// sensitivity scan completed. This is the capability that makes "a human
+/// initiates the connection" structural rather than advisory — see `Core::pool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolAccess {
-    /// UI / human path. `Core::pool` resolves via `ensure` (auto-open).
+    /// UI / human path. `Core::pool` resolves via `get_open`.
     Human,
-    /// Agent / MCP path. `Core::pool` resolves via `get_open` (never opens).
+    /// Agent / MCP path. `Core::pool` resolves via `get_for_agent`.
     Agent,
+}
+
+/// An open pool plus whether the sensitivity classifier has completed against
+/// it. Agents may only use a pool once `classified` is set; see
+/// [`PoolRegistry::get_for_agent`].
+struct OpenPool {
+    pool: PgPool,
+    classified: bool,
 }
 
 #[derive(Default, Clone)]
 pub struct PoolRegistry {
-    inner: Arc<Mutex<HashMap<String, PgPool>>>,
+    inner: Arc<Mutex<HashMap<String, OpenPool>>>,
 }
 
 impl PoolRegistry {
+    /// Whether a pool is open for `name` (the human's view of "connected").
     pub async fn is_connected(&self, name: &str) -> bool {
         self.inner.lock().await.contains_key(name)
     }
 
-    /// Return an already-open pool, or `None`. **Never opens a new pool.**
-    /// This is the agent path's only way to reach Postgres, so it cannot
-    /// connect to a database a human hasn't already opened in the workbench.
+    /// Whether an agent may use `name`: the pool is open *and* its sensitivity
+    /// scan completed. This is the agent's view of "connected".
+    pub async fn is_agent_ready(&self, name: &str) -> bool {
+        self.inner.lock().await.get(name).is_some_and(|p| p.classified)
+    }
+
+    /// Return an already-open pool, or `None`. **Never opens a new pool** —
+    /// only the explicit `connect` command does, so every open pool has been
+    /// through the classifier.
     pub async fn get_open(&self, name: &str) -> Option<PgPool> {
-        self.inner.lock().await.get(name).cloned()
+        self.inner.lock().await.get(name).map(|p| p.pool.clone())
+    }
+
+    /// The agent path's only way to reach Postgres: an open pool whose
+    /// sensitivity scan completed, or `None`. A pool that is still being
+    /// classified, or whose scan failed, has no classifications to redact with
+    /// yet, so handing it to an agent would return real values — fail closed.
+    pub async fn get_for_agent(&self, name: &str) -> Option<PgPool> {
+        self.inner
+            .lock()
+            .await
+            .get(name)
+            .filter(|p| p.classified)
+            .map(|p| p.pool.clone())
+    }
+
+    /// Record that the classifier completed against the open pool for `name`.
+    pub async fn mark_classified(&self, name: &str) {
+        if let Some(p) = self.inner.lock().await.get_mut(name) {
+            p.classified = true;
+        }
     }
 
     pub async fn drop_pool(&self, name: &str) {
         if let Some(p) = self.inner.lock().await.remove(name) {
-            p.close().await;
+            p.pool.close().await;
         }
     }
 
-    /// Open and ping a pool. Replaces any existing entry.
+    /// Open and ping a pool. Replaces any existing entry. The new pool starts
+    /// unclassified, so agents can't use it until the classifier completes.
     pub async fn connect(&self, c: &Connection) -> Result<PgPool> {
         let mut opts = PgConnectOptions::from_str("postgres://")
             .unwrap_or_default()
@@ -71,33 +107,27 @@ impl PoolRegistry {
         // Ping
         sqlx::query("SELECT 1").fetch_one(&pool).await.with_context(|| "ping failed")?;
 
-        self.inner.lock().await.insert(c.name.clone(), pool.clone());
+        self.inner.lock().await.insert(
+            c.name.clone(),
+            OpenPool {
+                pool: pool.clone(),
+                classified: false,
+            },
+        );
         Ok(pool)
     }
 
-    /// Get an existing pool or create one on demand.
-    pub async fn ensure(
-        &self,
-        meta: &sqlx::SqlitePool,
-        name: &str,
-    ) -> Result<PgPool> {
-        {
-            let guard = self.inner.lock().await;
-            if let Some(p) = guard.get(name) {
-                return Ok(p.clone());
-            }
-        }
-        let conn = connections::get(meta, name).await?;
-        self.connect(&conn).await
-    }
-
     /// Test-only: register an already-open pool under `name`, bypassing the
-    /// secret store and metadata lookup that `connect`/`ensure` require. Lets
+    /// secret store and metadata lookup that `connect` requires. Lets
     /// integration tests point a `Core` at a live test database without
-    /// standing up the keychain or a real connection record.
+    /// standing up the keychain or a real connection record. `classified`
+    /// simulates whether the post-connect sensitivity scan completed.
     #[cfg(test)]
-    pub(crate) async fn insert_for_test(&self, name: &str, pool: PgPool) {
-        self.inner.lock().await.insert(name.to_string(), pool);
+    pub(crate) async fn insert_for_test(&self, name: &str, pool: PgPool, classified: bool) {
+        self.inner
+            .lock()
+            .await
+            .insert(name.to_string(), OpenPool { pool, classified });
     }
 }
 
