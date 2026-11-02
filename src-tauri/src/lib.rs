@@ -730,3 +730,66 @@ fn init_tracing(to_stderr: bool) {
         builder.try_init()
     };
 }
+
+/// Regression guard for `design/mcp-connection-authority.md` Phase 4: the
+/// `--mcp` entry must never be able to open a Postgres pool or read a
+/// credential. UI and MCP share one binary, so the pool opener and credential
+/// reader are linked in and one `use` away; this fails CI if any code the
+/// proxy path runs (`run_mcp`, `mcp.rs`, the MCP side of `bridge.rs`) names
+/// them.
+#[cfg(test)]
+mod mcp_isolation_tests {
+    const FORBIDDEN: &[&str] = &[
+        "Core",
+        "PoolRegistry",
+        "PoolAccess",
+        "pools.",
+        "get_password",
+        "secret_store",
+        "keyring",
+        "connect_with",
+        "PgPoolOptions",
+        "PgConnectOptions",
+        "sqlx",
+    ];
+
+    /// `src` from the first `start` up to the next `end`, with `//` comments
+    /// removed so prose about the invariant doesn't trip it.
+    fn code_between(src: &str, start: &str, end: &str) -> String {
+        let s = src.find(start).unwrap_or_else(|| panic!("marker not found: {start}"));
+        let e = s + src[s..].find(end).unwrap_or_else(|| panic!("marker not found: {end}"));
+        without_comments(&src[s..e])
+    }
+
+    fn without_comments(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn mcp_entry_reaches_no_pool_or_credential_code() {
+        let lib = include_str!("lib.rs");
+        let mcp = include_str!("mcp.rs");
+        let bridge = include_str!("bridge.rs");
+        let parts = [
+            ("lib.rs run_mcp", code_between(lib, "pub fn run_mcp()", "fn init_tracing")),
+            ("mcp.rs", without_comments(mcp)),
+            (
+                "bridge.rs MCP side",
+                code_between(bridge, "// ── MCP side: ProxyClient", "// ── UI side:"),
+            ),
+        ];
+        for (name, code) in &parts {
+            assert!(code.len() > 200, "{name}: section markers moved; update this guard");
+            for sym in FORBIDDEN {
+                assert!(
+                    !code.contains(sym),
+                    "{name} references `{sym}`: the --mcp proxy must not reach pool or \
+                     credential code (design/mcp-connection-authority.md Phase 4)"
+                );
+            }
+        }
+    }
+}
