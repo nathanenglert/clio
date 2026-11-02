@@ -26,6 +26,9 @@ import { CellEditor } from "./CellEditor";
 type Props = {
   result: QueryResult | null;
   error: string | null;
+  /** Row-count label ("3 rows updated"); the empty state shows it in place
+   *  of "0 rows", which is misleading for a write. */
+  countLabel?: string;
   // Editing
   editable: boolean;
   /** Why the result is read-only (only used when editable=false). */
@@ -62,6 +65,7 @@ export function ResultsGrid(props: Props) {
   const {
     result,
     error,
+    countLabel,
     editable,
     readOnlyReason,
     columnsMeta,
@@ -449,6 +453,7 @@ export function ResultsGrid(props: Props) {
                   const boxShadow = cellBoxShadow(edges, dirty);
                   const cls = [
                     isNull ? "null" : "",
+                    col.redacted && !isNull ? "redacted" : "",
                     isJson ? "json" : "",
                     dirty ? "dirty" : "",
                     highlighted ? "cell-selected" : "",
@@ -596,7 +601,7 @@ export function ResultsGrid(props: Props) {
         <div className="grid-empty" role="status">
           <span className="grid-empty-glyph" aria-hidden>○</span>
           <div className="grid-empty-body">
-            <div className="grid-empty-title">Query succeeded · 0 rows</div>
+            <div className="grid-empty-title">Query succeeded · {countLabel ?? "0 rows"}</div>
             <div className="grid-empty-hint mono">
               completed in {result.elapsed_ms}ms
             </div>

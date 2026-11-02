@@ -106,21 +106,40 @@ impl Core {
     }
 
     /// The single seam every query/schema/execute path uses to acquire a
-    /// Postgres pool. A `Human` core may open the pool on demand; an `Agent`
-    /// core may only use a pool a human already opened, so an agent can never
-    /// reach a database the human hasn't connected in the workbench. Routing
-    /// *all* pool acquisition through here (rather than calling
-    /// `PoolRegistry::ensure` directly) keeps that guarantee from silently
+    /// Postgres pool. Neither core opens pools here — only the explicit
+    /// `connect` command does, and it runs the sensitivity classifier. A
+    /// `Human` core may use any open pool. An `Agent` core may only use a pool
+    /// a human opened *and* whose classifier completed, so an agent can never
+    /// reach a database the human hasn't connected, nor one it would read
+    /// unredacted. Routing *all* pool acquisition through here (rather than
+    /// calling `PoolRegistry` directly) keeps that guarantee from silently
     /// regressing when a new call site is added.
     pub(crate) async fn pool(&self, conn: &str) -> Result<PgPool> {
         match self.pool_access {
-            PoolAccess::Human => self.pools.ensure(&self.meta, conn).await,
-            PoolAccess::Agent => self.pools.get_open(conn).await.ok_or_else(|| {
-                anyhow::anyhow!(
+            PoolAccess::Human => self.pools.get_open(conn).await.ok_or_else(|| {
+                anyhow::anyhow!("not connected: connect '{conn}' in the workbench first")
+            }),
+            PoolAccess::Agent => match self.pools.get_for_agent(conn).await {
+                Some(pool) => Ok(pool),
+                None if self.pools.is_connected(conn).await => Err(anyhow::anyhow!(
+                    "'{conn}' is open but its sensitivity scan has not completed, so \
+                     redaction can't be guaranteed; a human must reconnect it in the \
+                     workbench before an agent can use it"
+                )),
+                None => Err(anyhow::anyhow!(
                     "not connected: a human must connect '{conn}' in the workbench \
                      before an agent can use it"
-                )
-            }),
+                )),
+            },
+        }
+    }
+
+    /// Whether `conn` counts as connected for this core: any open pool for the
+    /// human, an open *and classified* pool for an agent (see [`Core::pool`]).
+    pub(crate) async fn is_connected(&self, conn: &str) -> bool {
+        match self.pool_access {
+            PoolAccess::Human => self.pools.is_connected(conn).await,
+            PoolAccess::Agent => self.pools.is_agent_ready(conn).await,
         }
     }
 
@@ -172,12 +191,11 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// The core safety invariant: an agent-access core can NEVER open a pool —
-    /// it only sees pools a human already opened. With nothing open, every
-    /// agent pool acquisition fails closed with "not connected", while the
-    /// human core instead goes down the auto-open path (a different failure).
+    /// The core safety invariant: no core opens a pool on demand. With nothing
+    /// open, both the human and the agent pool acquisition fail closed with
+    /// "not connected" — only the explicit `connect` command opens pools.
     #[tokio::test]
-    async fn agent_core_cannot_open_a_pool() {
+    async fn no_core_opens_a_pool_on_demand() {
         let meta = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let emit: EmitFn = Arc::new(|_| {});
         let (human, agent) = Core::ui_with_agent(meta, PoolRegistry::default(), emit);
@@ -187,14 +205,37 @@ mod tests {
             agent_err.contains("not connected"),
             "agent path must fail closed, got: {agent_err}"
         );
-
-        // The human path does not hit the "not connected" guard — it tries to
-        // open (and errors elsewhere, since the in-memory meta has no rows).
         let human_err = human.pool("anything").await.unwrap_err().to_string();
         assert!(
-            !human_err.contains("not connected"),
-            "human path must attempt to open, got: {human_err}"
+            human_err.contains("not connected"),
+            "human path must not auto-open, got: {human_err}"
         );
+    }
+
+    /// An open pool whose sensitivity scan hasn't completed (still running, or
+    /// failed) is usable by the human but refused to the agent — otherwise the
+    /// agent would read a never-classified database unredacted.
+    #[tokio::test]
+    async fn agent_refuses_an_unclassified_pool() {
+        let meta = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let emit: EmitFn = Arc::new(|_| {});
+        let pools = PoolRegistry::default();
+        let (human, agent) = Core::ui_with_agent(meta, pools.clone(), emit);
+        // A lazy pool never touches the network.
+        let pg = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody@localhost/none")
+            .unwrap();
+        pools.insert_for_test("db", pg, false).await;
+
+        assert!(human.pool("db").await.is_ok(), "human may use any open pool");
+        assert!(human.is_connected("db").await);
+        let err = agent.pool("db").await.unwrap_err().to_string();
+        assert!(err.contains("sensitivity scan"), "agent must be refused, got: {err}");
+        assert!(!agent.is_connected("db").await, "agent must not see it as connected");
+
+        pools.mark_classified("db").await;
+        assert!(agent.pool("db").await.is_ok(), "classified pool is usable by the agent");
+        assert!(agent.is_connected("db").await);
     }
 
     /// Per-agent attribution: `for_agent` tags activity/permission requests so

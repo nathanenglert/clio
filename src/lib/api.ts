@@ -123,6 +123,9 @@ export type QueryResult = {
   row_count: number;
   truncated: boolean;
   elapsed_ms: number;
+  /** Rows the statement inserted/updated/deleted (its command tag count).
+   *  `row_count` only counts rows returned. */
+  rows_affected?: number;
   /** Present when one or more columns were redacted. */
   redaction_meta?: RedactionMeta;
 };

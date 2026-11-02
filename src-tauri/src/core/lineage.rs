@@ -28,8 +28,8 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Expr, ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Statement, TableFactor,
-    TableObject, TableWithJoins, Visit, Visitor,
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName, ObjectNamePart, Query,
+    SelectItem, SetExpr, Statement, TableFactor, TableObject, TableWithJoins, Visit, Visitor,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -73,6 +73,12 @@ pub(super) fn should_redact_derived(sql: &str, view: &RedactorView) -> bool {
         return false;
     }
 
+    // A column-alias list (`FROM patients AS p(a, b, …)`) renames classified
+    // columns, so the name matching below can't see them — fail closed.
+    if classified_table_renames_columns(stmt, view) {
+        return true;
+    }
+
     match stmt {
         Statement::Query(q) => query_exposes_sensitive(q, &tables, view),
         Statement::Insert(i) => returning_exposes_sensitive(stmt, &i.returning, &tables, view),
@@ -80,6 +86,120 @@ pub(super) fn should_redact_derived(sql: &str, view: &RedactorView) -> bool {
         Statement::Delete(d) => returning_exposes_sensitive(stmt, &d.returning, &tables, view),
         // DDL and other statements return no result rows to redact.
         _ => false,
+    }
+}
+
+/// Functions that run SQL handed to them as a string (or over another
+/// connection), so the relations they read never appear in the AST that
+/// lineage analyzes.
+const SQL_EXECUTING_FUNCTIONS: &[&str] = &[
+    "query_to_xml",
+    "query_to_xmlschema",
+    "query_to_xml_and_xmlschema",
+    "cursor_to_xml",
+    "cursor_to_xmlschema",
+    "table_to_xml",
+    "table_to_xmlschema",
+    "table_to_xml_and_xmlschema",
+    "schema_to_xml",
+    "schema_to_xmlschema",
+    "schema_to_xml_and_xmlschema",
+    "database_to_xml",
+    "database_to_xmlschema",
+    "database_to_xml_and_xmlschema",
+    "ts_stat",
+    "dblink",
+    "dblink_exec",
+    "dblink_open",
+    "dblink_fetch",
+    "dblink_send_query",
+    "dblink_get_result",
+];
+
+/// Catalogs that store sampled column values (most-common values, histogram
+/// bounds) for every column, classified or not.
+const VALUE_SAMPLING_CATALOGS: &[&str] = &[
+    "pg_stats",
+    "pg_stats_ext",
+    "pg_stats_ext_exprs",
+    "pg_statistic",
+    "pg_statistic_ext_data",
+];
+
+/// The first function or relation in `sql` whose output lineage can't trace —
+/// a SQL-executing function or a value-sampling catalog — if any. Matches
+/// parsed names, not raw text; unparseable SQL falls back to a text match so
+/// it only ever over-reports. This is a blocklist: it closes the known
+/// channels, not every possible one.
+pub(super) fn untraceable_reference(sql: &str) -> Option<&'static str> {
+    struct Finder(Option<&'static str>);
+    impl Finder {
+        fn check(&mut self, name: &ObjectName) -> ControlFlow<()> {
+            let Some(n) = last_ident(name) else {
+                return ControlFlow::Continue(());
+            };
+            match SQL_EXECUTING_FUNCTIONS
+                .iter()
+                .chain(VALUE_SAMPLING_CATALOGS)
+                .find(|b| **b == n)
+            {
+                Some(hit) => {
+                    self.0 = Some(hit);
+                    ControlFlow::Break(())
+                }
+                None => ControlFlow::Continue(()),
+            }
+        }
+    }
+    impl Visitor for Finder {
+        type Break = ();
+        fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<()> {
+            self.check(relation)
+        }
+        fn pre_visit_table_factor(&mut self, tf: &TableFactor) -> ControlFlow<()> {
+            match tf {
+                TableFactor::Function { name, .. } => self.check(name),
+                _ => ControlFlow::Continue(()),
+            }
+        }
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            match expr {
+                Expr::Function(f) => self.check(&f.name),
+                _ => ControlFlow::Continue(()),
+            }
+        }
+    }
+
+    let dialect = PostgreSqlDialect {};
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(stmts) => {
+            let mut f = Finder(None);
+            let _ = stmts.visit(&mut f);
+            f.0
+        }
+        Err(_) => {
+            let lower = sql.to_ascii_lowercase();
+            SQL_EXECUTING_FUNCTIONS
+                .iter()
+                .chain(VALUE_SAMPLING_CATALOGS)
+                .find(|b| lower.contains(**b))
+                .copied()
+        }
+    }
+}
+
+/// Whether `sql` touches any classified table — read, joined, written, or
+/// referenced in a subquery. Unparseable SQL falls back to a text match, so
+/// this only ever over-reports. Used to keep a write that could copy classified
+/// values into an unclassified place (`INSERT INTO public.t SELECT ssn …`) from
+/// riding a row-bounded allow rule.
+pub(super) fn references_classified_table(sql: &str, view: &RedactorView) -> bool {
+    let dialect = PostgreSqlDialect {};
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(stmts) => stmts
+            .iter()
+            .any(|s| statement_tables(s).iter().any(|t| view.by_name.contains_key(t))),
+        Err(_) => sql_mentions_classified_table(sql, view),
     }
 }
 
@@ -106,11 +226,49 @@ fn query_exposes_sensitive(q: &Query, tables: &HashSet<String>, view: &RedactorV
 
     let sources: Vec<&TableWithJoins> = select.from.iter().collect();
     let (sensitive_cols, sensitive_table_refs) = build_scope(tables, &sources, view);
-    select
+    // `SELECT p FROM patients p` projects the whole row as one untagged record
+    // column — bare in syntax, but derived in effect.
+    let whole_row = select
         .projection
         .iter()
-        .filter_map(derived_expr)
-        .any(|e| expr_is_sensitive(e, &sensitive_cols, &sensitive_table_refs))
+        .any(|item| bare_ident(item).is_some_and(|n| sensitive_table_refs.contains(&n)));
+    whole_row
+        || select
+            .projection
+            .iter()
+            .filter_map(derived_expr)
+            .any(|e| expr_is_sensitive(e, &sensitive_cols, &sensitive_table_refs))
+}
+
+/// The lowercased name of a projection item that is a lone unqualified
+/// identifier (`SELECT p`), if it is one.
+fn bare_ident(item: &SelectItem) -> Option<String> {
+    let e = match item {
+        SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => e,
+        _ => return None,
+    };
+    match unwrap_nested(e) {
+        Expr::Identifier(i) => Some(i.value.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// Whether any classified table in `stmt` carries a column-alias list.
+fn classified_table_renames_columns(stmt: &Statement, view: &RedactorView) -> bool {
+    struct Finder<'a>(&'a RedactorView);
+    impl Visitor for Finder<'_> {
+        type Break = ();
+        fn pre_visit_table_factor(&mut self, tf: &TableFactor) -> ControlFlow<()> {
+            if let TableFactor::Table { name, alias: Some(alias), .. } = tf {
+                let classified = last_ident(name).is_some_and(|t| self.0.by_name.contains_key(&t));
+                if classified && !alias.columns.is_empty() {
+                    return ControlFlow::Break(());
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    stmt.visit(&mut Finder(view)).is_break()
 }
 
 /// `INSERT/UPDATE/DELETE … RETURNING <exprs>` analysis. Same lineage rule as a
@@ -294,6 +452,13 @@ struct SensitiveExprVisitor<'a> {
     sensitive_table_refs: &'a HashSet<String>,
 }
 
+impl SensitiveExprVisitor<'_> {
+    /// `name.*` where `name` is a classified table or its alias.
+    fn is_sensitive_row(&self, name: &ObjectName) -> bool {
+        last_ident(name).is_some_and(|n| self.sensitive_table_refs.contains(&n))
+    }
+}
+
 impl Visitor for SensitiveExprVisitor<'_> {
     type Break = ();
 
@@ -312,6 +477,29 @@ impl Visitor for SensitiveExprVisitor<'_> {
             Expr::CompoundIdentifier(parts) => {
                 if let Some(last) = parts.last() {
                     if self.sensitive_cols.contains(&last.value.to_ascii_lowercase()) {
+                        return ControlFlow::Break(());
+                    }
+                }
+            }
+            // `p.*` as an expression (`(p.*)::text`) is the whole row.
+            Expr::QualifiedWildcard(name, _) => {
+                if self.is_sensitive_row(name) {
+                    return ControlFlow::Break(());
+                }
+            }
+            // `to_jsonb(p.*)`: a wildcard argument is a `FunctionArgExpr`, not
+            // an `Expr`, so the walk never reaches it on its own.
+            Expr::Function(f) => {
+                if let FunctionArguments::List(list) = &f.args {
+                    let row_arg = list.args.iter().any(|a| match a {
+                        FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(n))
+                        | FunctionArg::Named { arg: FunctionArgExpr::QualifiedWildcard(n), .. }
+                        | FunctionArg::ExprNamed { arg: FunctionArgExpr::QualifiedWildcard(n), .. } => {
+                            self.is_sensitive_row(n)
+                        }
+                        _ => false,
+                    });
+                    if row_arg {
                         return ControlFlow::Break(());
                     }
                 }
@@ -385,6 +573,32 @@ mod tests {
     }
 
     #[test]
+    fn redacts_through_column_alias_lists() {
+        // `p(x1, x2, x3)` renames ssn/email out from under name matching.
+        assert!(redacts(
+            "SELECT x2||'' FROM clinical.patients AS p(x1, x2, x3)",
+            PATIENTS
+        ));
+        assert!(redacts(
+            "SELECT lower(e) FROM orders o JOIN patients p(i, s, e) ON true",
+            PATIENTS
+        ));
+        // An alias list on an unclassified table changes nothing.
+        assert!(!redacts("SELECT upper(c) FROM warehouses w(c)", PATIENTS));
+    }
+
+    #[test]
+    fn redacts_qualified_wildcard_row_references() {
+        assert!(redacts("SELECT to_jsonb(p.*) FROM clinical.patients p", PATIENTS));
+        assert!(redacts("SELECT row_to_json(patients.*) FROM patients", PATIENTS));
+        assert!(redacts("SELECT (p.*)::text FROM patients p", PATIENTS));
+        assert!(redacts("SELECT p FROM patients p", PATIENTS));
+        // `count(*)` is a plain wildcard argument, not a row.
+        assert!(!redacts("SELECT count(*) FROM patients p", PATIENTS));
+        assert!(!redacts("SELECT to_jsonb(w.*) FROM warehouses w", PATIENTS));
+    }
+
+    #[test]
     fn keeps_bare_and_wildcard_projections() {
         // Bare refs and `*` are OID-tagged and handled by the faker path, so
         // lineage must not force blanket derived redaction for them.
@@ -425,6 +639,41 @@ mod tests {
             "SELECT * FROM (SELECT n FROM widgets) x",
             PATIENTS
         ));
+    }
+
+    #[test]
+    fn detects_writes_that_touch_classified_tables() {
+        let v = view(PATIENTS);
+        for sql in [
+            "INSERT INTO public.audit_log (target_id) SELECT ssn FROM clinical.patients RETURNING target_id",
+            "UPDATE public.leads SET note = (SELECT email FROM patients LIMIT 1)",
+            "UPDATE patients SET notes = ssn",
+            "INSERT INTO patients (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET notes = patients.ssn",
+            "WITH c AS (SELECT ssn FROM patients) INSERT INTO public.t SELECT * FROM c",
+        ] {
+            assert!(references_classified_table(sql, &v), "{sql}");
+        }
+        assert!(!references_classified_table("UPDATE public.leads SET status = 'x'", &v));
+        assert!(!references_classified_table("INSERT INTO public.t VALUES (1)", &v));
+    }
+
+    #[test]
+    fn finds_sql_executing_functions_and_sampling_catalogs() {
+        for (sql, hit) in [
+            ("SELECT query_to_xml('select ssn from patients', true, false, '')", "query_to_xml"),
+            ("SELECT pg_catalog.table_to_xml('patients'::regclass, true, false, '')", "table_to_xml"),
+            ("SELECT * FROM ts_stat('select tsv from notes')", "ts_stat"),
+            ("SELECT most_common_vals FROM pg_stats WHERE attname = 'ssn'", "pg_stats"),
+            ("SELECT n FROM (SELECT 1 n) x JOIN pg_catalog.pg_statistic s ON true", "pg_statistic"),
+            ("INSERT INTO t SELECT schema_to_xml('clinical', true, false, '')", "schema_to_xml"),
+            // Unparseable SQL still gets caught by the text fallback.
+            ("SELECT query_to_xml('x' FROM", "query_to_xml"),
+        ] {
+            assert_eq!(untraceable_reference(sql), Some(hit), "{sql}");
+        }
+        assert_eq!(untraceable_reference("SELECT xmlelement(name a, 'b')"), None);
+        assert_eq!(untraceable_reference("SELECT * FROM pg_stat_user_tables"), None);
+        assert_eq!(untraceable_reference("SELECT count(*) FROM patients"), None);
     }
 
     #[test]

@@ -188,6 +188,11 @@ pub async fn classify_schema(core: &Core, conn: &str) -> Result<ClassifyOutcome>
         // mapping.
         connections::ensure_redaction_secret(&connection.name)?;
 
+        // Only now is the pool safe to hand to an agent. Drop any redactor
+        // view cached before this scan so the new classifications apply.
+        core.redactor_cache.invalidate(conn).await;
+        core.pools.mark_classified(conn).await;
+
         Ok::<_, anyhow::Error>(ClassifyOutcome {
             new_pending,
             already_classified,

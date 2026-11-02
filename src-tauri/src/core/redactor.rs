@@ -94,17 +94,27 @@ async fn build_view(
     connection_id: &str,
 ) -> Result<RedactorView> {
     let classifications = connections::list_classifications(meta, connection_id).await?;
-    let secret = connections::get_redaction_secret(conn_name)
-        .with_context(|| format!("redaction secret for {conn_name}"))?
-        .unwrap_or([0u8; 32]); // see note below
 
     if classifications.is_empty() {
+        // An empty view never redacts (`view_for` returns `None`), so the
+        // secret is never read.
         return Ok(RedactorView {
             by_oid: Arc::new(HashMap::new()),
             by_name: Arc::new(HashMap::new()),
-            secret: Arc::new(secret),
+            secret: Arc::new([0u8; 32]),
         });
     }
+
+    // Classifications exist, so fakes need the per-connection secret. The
+    // classifier normally creates it; if it's missing (e.g. a keychain write
+    // failed after classifications were stored), create it now. Never fall
+    // back to a fixed key — fakes under a publicly known key would be
+    // linkable across connections.
+    connections::ensure_redaction_secret(conn_name)
+        .with_context(|| format!("create redaction secret for {conn_name}"))?;
+    let secret = connections::get_redaction_secret(conn_name)
+        .with_context(|| format!("redaction secret for {conn_name}"))?
+        .with_context(|| format!("redaction secret for {conn_name} is missing"))?;
 
     // Name-keyed view for lineage analysis, built straight from the stored
     // classifications (independent of OID resolution below).
