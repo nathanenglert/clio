@@ -26,6 +26,7 @@ use super::permission::{
 use super::lineage;
 use super::policy::{self, OpKind, StmtInfo, StmtKind, Verdict};
 use super::query::{cap_payload, reject_untraceable, run_decoded, sanitize_db_error};
+use super::sensitivity;
 use super::Core;
 
 pub async fn execute_statement(
@@ -67,6 +68,9 @@ async fn run_with_gate(
     // 2. Open the pool early — needed for EXPLAIN below and for running
     //    whatever statement comes out the other side of the gate.
     let pool = core.pool(conn).await?;
+    // Gate on current classifications: rescan if the SQL names a relation
+    // that changed since the last scan.
+    sensitivity::ensure_scan_current(core, conn, &pool, sql).await?;
 
     // 3. Row estimate via EXPLAIN — only meaningful for data writes. DDL
     //    rejects EXPLAIN; reads don't trigger row-bounded rules; TRUNCATE
@@ -95,17 +99,17 @@ async fn run_with_gate(
     // would refuse it after their approval anyway.
     reject_untraceable(core, view.is_some(), sql)?;
 
-    // A write that touches a classified table can copy classified values
-    // somewhere unredacted — into an unclassified column or table, or back out
-    // through RETURNING — so it never rides a row-bounded allow rule.
+    // A write that reads classified data can copy classified values somewhere
+    // unredacted — into an unclassified column or table, or back out through
+    // RETURNING — so it never rides a row-bounded allow rule. Writing literals
+    // into a classified table can't, so it still may.
     let verdict = match verdict {
         Verdict::Allow { .. } if stmt.kind.op_kind() != OpKind::Read => {
             match &view {
-                Some(v) if lineage::references_classified_table(sql, v) => Verdict::Prompt {
-                    rule: "Write touching classified data — prompt".into(),
-                    reason: "This write reads or modifies a table with classified \
-                             (PHI/PCI/PII) columns, so it could copy their values somewhere \
-                             unredacted"
+                Some(v) if lineage::write_reads_classified(sql, v) => Verdict::Prompt {
+                    rule: "Write reading classified data — prompt".into(),
+                    reason: "This write reads classified (PHI/PCI/PII) columns, so it could \
+                             copy their values somewhere unredacted"
                         .into(),
                 },
                 _ => verdict,
@@ -471,6 +475,12 @@ async fn run_migration_with_gate(
         let done = run
             .map_err(|e| sanitize_db_error(core, classified, e))
             .with_context(|| format!("stmt {idx} failed"))?;
+        // Outside a transaction each statement is final once it runs.
+        if tx_opt.is_none() {
+            sensitivity::inherit_from_write(core, conn, &pool, final_sql)
+                .await
+                .with_context(|| format!("stmt {idx} ran, but classifying the data it copied failed"))?;
+        }
         results.push(QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -484,6 +494,11 @@ async fn run_migration_with_gate(
 
     if let Some(tx) = tx_opt {
         tx.commit().await.context("commit migration transaction")?;
+        for (idx, final_sql) in final_sqls.iter().enumerate() {
+            sensitivity::inherit_from_write(core, conn, &pool, final_sql)
+                .await
+                .with_context(|| format!("stmt {idx} ran, but classifying the data it copied failed"))?;
+        }
     }
 
     Ok(results)
@@ -555,7 +570,11 @@ mod tests {
     use crate::core::policy;
     use crate::core::Core;
     use crate::pool::PoolRegistry;
-    use crate::types::{ActivityEvent, Category, ClassificationStatus, NewConnectionInput};
+    use crate::core::{classify_schema, update_classification};
+    use crate::types::{
+        ActivityEvent, Category, Classification, ClassificationAction, ClassificationStatus,
+        NewConnectionInput, QueryResult,
+    };
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
     use std::sync::Arc;
@@ -1266,5 +1285,230 @@ mod tests {
             msg.contains("withheld") || msg.contains("redaction"),
             "expected a sanitized error, got: {msg}"
         );
+    }
+
+    // ── Fail-closed classification ───────────────────────────────────────
+    //
+    // The agent path rescans when its SQL names a relation that changed since
+    // the last scan, so these change the schema behind the classifier's back
+    // and read it as the agent. See core::sensitivity.
+
+    async fn raw(h: &Harness, sql: &str) {
+        sqlx::raw_sql(sql).execute(&h.pool).await.unwrap();
+    }
+
+    async fn classify(h: &Harness, table: &str, column: &str, status: ClassificationStatus) {
+        let conn_id = connections::get(&h.core.meta, TEST_CONN).await.unwrap().id;
+        connections::insert_classification(
+            &h.core.meta, &conn_id, &h.schema, table, column, Category::Pii, status, "test",
+        )
+        .await
+        .unwrap();
+        h.core.redactor_cache.invalidate(TEST_CONN).await;
+    }
+
+    async fn classification(h: &Harness, table: &str, column: &str) -> Option<Classification> {
+        let conn_id = connections::get(&h.core.meta, TEST_CONN).await.unwrap().id;
+        connections::list_classifications(&h.core.meta, &conn_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.schema == h.schema && c.table == table && c.column == column)
+    }
+
+    async fn agent_read(h: &Harness, sql: &str) -> QueryResult {
+        execute_statement(&h.core, TEST_CONN, sql, None).await.expect("agent read runs")
+    }
+
+    #[tokio::test]
+    async fn unreviewed_text_is_redacted_until_marked_safe() {
+        let Some(h) = setup().await else { return };
+        let s = h.schema.clone();
+        let real = "Pt SSN 123-45-6789, call back";
+        let create = format!(
+            "CREATE TABLE {s}.appointments (id int, notes text); \
+             INSERT INTO {s}.appointments VALUES (1, '{real}');"
+        );
+        raw(&h, &create).await;
+        let read = format!("SELECT notes FROM {s}.appointments");
+
+        // Never scanned: the read rescans first, and the type rule catches it.
+        let r = agent_read(&h, &read).await;
+        assert!(r.columns[0].redacted, "unreviewed text must be redacted");
+        assert_ne!(r.rows[0][0].as_deref(), Some(real));
+        let c = classification(&h, "appointments", "notes").await.expect("classified by the rescan");
+        assert_eq!(c.status, ClassificationStatus::Pending);
+        assert_eq!(c.reason, "sampled values include SSNs (1 of 1)");
+
+        // Marked safe: visible, and a later scan doesn't suggest it again.
+        update_classification(&h.core, TEST_CONN, &s, "appointments", "notes", ClassificationAction::MarkSafe)
+            .await
+            .unwrap();
+        classify_schema(&h.core, TEST_CONN).await.unwrap();
+        let r = agent_read(&h, &read).await;
+        assert!(!r.columns[0].redacted);
+        assert_eq!(r.rows[0][0].as_deref(), Some(real));
+
+        // Dropped and recreated: the Safe mark no longer applies.
+        raw(&h, &format!("DROP TABLE {s}.appointments; {create}")).await;
+        let r = agent_read(&h, &read).await;
+        assert!(r.columns[0].redacted, "a recreated column goes back to review");
+        let c = classification(&h, "appointments", "notes").await.unwrap();
+        assert_eq!(c.status, ClassificationStatus::Pending);
+
+        h.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn recreated_table_is_still_redacted() {
+        let Some(h) = setup().await else { return };
+        let real = setup_classified_patients(&h).await;
+        let read = format!("SELECT ssn FROM {}.patients", h.schema);
+        // Run the read on every pooled connection, so each has it prepared.
+        let warm: Vec<_> = (0..8)
+            .map(|_| {
+                let (core, read) = (h.core.clone(), read.clone());
+                tokio::spawn(async move { execute_statement(&core, TEST_CONN, &read, None).await })
+            })
+            .collect();
+        for w in warm {
+            w.await.unwrap().expect("warm-up read runs");
+        }
+        // Same shape, new table OID: a prepared statement's cached column
+        // metadata would still name the old one.
+        raw(
+            &h,
+            &format!(
+                "DROP TABLE {s}.patients; CREATE TABLE {s}.patients (id int, ssn text); \
+                 INSERT INTO {s}.patients VALUES (1, '{real}');",
+                s = h.schema
+            ),
+        )
+        .await;
+        for _ in 0..8 {
+            let r = agent_read(&h, &read).await;
+            assert!(r.columns[0].redacted, "a recreated classified column must stay redacted");
+            assert_ne!(r.rows[0][0].as_deref(), Some(real.as_str()));
+        }
+        h.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn card_numbers_in_a_number_column_are_found() {
+        let Some(h) = setup().await else { return };
+        let s = h.schema.clone();
+        raw(
+            &h,
+            &format!(
+                "CREATE TABLE {s}.payments (id int, ref bigint, qty bigint); \
+                 INSERT INTO {s}.payments VALUES \
+                   (1, 4111111111111111, 1), (2, 4242424242424242, 2), (3, 5555555555554444, 3);"
+            ),
+        )
+        .await;
+        let r = agent_read(&h, &format!("SELECT ref, qty FROM {s}.payments ORDER BY id")).await;
+        assert!(r.columns[0].redacted, "card numbers must be redacted");
+        assert_ne!(r.rows[0][0].as_deref(), Some("4111111111111111"));
+        assert!(!r.columns[1].redacted, "an ordinary number column stays visible");
+        assert_eq!(r.rows[0][1].as_deref(), Some("1"));
+        let c = classification(&h, "payments", "ref").await.unwrap();
+        assert_eq!(c.category, Category::Pci);
+        h.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn views_inherit_classified_columns() {
+        let Some(h) = setup().await else { return };
+        let s = h.schema.clone();
+        // `d1` matches no name rule and isn't text: only the manual
+        // classification makes it sensitive, so the view must inherit it.
+        raw(&h, &format!("CREATE TABLE {s}.people (id int, d1 date); INSERT INTO {s}.people VALUES (1, '1980-02-03');")).await;
+        classify(&h, "people", "d1", ClassificationStatus::Confirmed).await;
+        raw(
+            &h,
+            &format!(
+                "CREATE VIEW {s}.v_people AS \
+                 SELECT id, d1 AS when_born, extract(year FROM d1)::int AS yr FROM {s}.people"
+            ),
+        )
+        .await;
+
+        let r = agent_read(&h, &format!("SELECT id, when_born, yr FROM {s}.v_people")).await;
+        assert!(!r.columns[0].redacted, "id is not classified");
+        assert!(r.columns[1].redacted, "a renamed copy of d1 inherits");
+        assert!(r.columns[2].redacted, "an expression over d1 inherits");
+        assert_eq!(
+            classification(&h, "v_people", "when_born").await.unwrap().reason,
+            "view copies classified column \"d1\""
+        );
+        h.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn copies_of_classified_data_are_classified() {
+        let Some(mut h) = setup().await else { return };
+        let s = h.schema.clone();
+        raw(
+            &h,
+            &format!(
+                "CREATE TABLE {s}.people (id int, d1 date); \
+                 INSERT INTO {s}.people VALUES (1, '1980-02-03'); \
+                 CREATE TABLE {s}.notes (v date);"
+            ),
+        )
+        .await;
+        classify(&h, "people", "d1", ClassificationStatus::Confirmed).await;
+        classify(&h, "notes", "v", ClassificationStatus::Safe).await;
+
+        // CREATE TABLE AS prompts; approve it.
+        let core = h.core.clone();
+        let sql = format!("CREATE TABLE {s}.scratch AS SELECT id, d1 AS d FROM {s}.people");
+        let run = tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql, None).await });
+        h.resolve_next_permission(PermissionVerdict::Allow).await;
+        run.await.unwrap().expect("approved CTAS runs");
+
+        let c = classification(&h, "scratch", "d").await.expect("the copy is classified");
+        assert_eq!(c.status, ClassificationStatus::Pending);
+        assert_eq!(c.reason, "a write copied classified column \"d1\" into it");
+        assert!(classification(&h, "scratch", "id").await.is_none());
+        let r = agent_read(&h, &format!("SELECT d FROM {s}.scratch")).await;
+        assert!(r.columns[0].redacted);
+
+        // Classified data copied into a Safe column sends it back to review.
+        let core = h.core.clone();
+        let sql = format!("INSERT INTO {s}.notes (v) SELECT d1 FROM {s}.people");
+        let run = tokio::spawn(async move { execute_statement(&core, TEST_CONN, &sql, None).await });
+        h.resolve_next_permission(PermissionVerdict::Allow).await;
+        run.await.unwrap().expect("approved insert runs");
+        assert_eq!(
+            classification(&h, "notes", "v").await.unwrap().status,
+            ClassificationStatus::Pending
+        );
+        h.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn renamed_columns_keep_their_classification() {
+        let Some(h) = setup().await else { return };
+        let s = h.schema.clone();
+        raw(&h, &format!("CREATE TABLE {s}.people (id int, d1 date); INSERT INTO {s}.people VALUES (1, '1980-02-03');")).await;
+        classify(&h, "people", "d1", ClassificationStatus::Confirmed).await;
+        classify_schema(&h.core, TEST_CONN).await.unwrap();
+
+        // Renamed outside the workbench (a deploy's migration, say).
+        raw(
+            &h,
+            &format!(
+                "ALTER TABLE {s}.people RENAME COLUMN d1 TO born; \
+                 ALTER TABLE {s}.people RENAME TO persons;"
+            ),
+        )
+        .await;
+        let r = agent_read(&h, &format!("SELECT born FROM {s}.persons")).await;
+        assert!(r.columns[0].redacted, "the classification follows the rename");
+        let c = classification(&h, "persons", "born").await.unwrap();
+        assert_eq!(c.status, ClassificationStatus::Confirmed);
+        assert!(classification(&h, "people", "d1").await.is_none());
+        h.drop_schema().await;
     }
 }

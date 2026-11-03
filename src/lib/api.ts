@@ -263,7 +263,7 @@ export type NewConnectionInput = {
 // ── Sensitivity classifications (per-connection) ─────────────────
 // Mirrors src-tauri/src/types.rs. See design/redaction.md.
 
-export type ClassificationStatus = "pending" | "confirmed";
+export type ClassificationStatus = "pending" | "confirmed" | "safe";
 
 export type Classification = {
   schema: string;
@@ -283,7 +283,7 @@ export type ClassifyOutcome = {
 
 export type ClassificationAction =
   | { kind: "confirm" }
-  | { kind: "remove" }
+  | { kind: "mark_safe" }
   | { kind: "set_category"; category: Category }
   | { kind: "add_manual"; category: Category };
 

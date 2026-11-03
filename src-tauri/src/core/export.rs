@@ -62,7 +62,9 @@ pub async fn export_query(
             .with_context(|| format!("create file {}", path))?;
         let mut w = BufWriter::new(file);
 
-        let mut stream = sqlx::query(sql).fetch(&pool);
+        // Re-described each run, like `query::fetch_counted`: a cached
+        // statement can name a recreated table's old OID.
+        let mut stream = sqlx::query(sql).persistent(false).fetch(&pool);
         let mut row_count: usize = 0;
         let mut columns: Vec<(String, String)> = Vec::new();
         let mut redactors: Vec<Option<ColRedactor>> = Vec::new();

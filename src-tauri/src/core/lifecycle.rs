@@ -115,6 +115,7 @@ pub async fn disconnect(core: &Core, name: &str) -> Result<()> {
     let started = Instant::now();
     core.pools.drop_pool(name).await;
     core.redactor_cache.invalidate(name).await;
+    core.scans.forget(name).await;
     let r: Result<()> = Ok(());
     core.record_ok("disconnect", name, started, &r);
     r
