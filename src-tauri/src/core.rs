@@ -34,6 +34,7 @@ pub use snippets::{delete_snippet, list_snippets, upsert_snippet};
 
 use permission::{PendingConnects, PendingMigrations, PendingPermissions};
 use redactor::RedactorCache;
+use sensitivity::ScanIndex;
 
 /// Container the UI- and MCP-mode entry points both hand to core fns.
 #[derive(Clone)]
@@ -64,6 +65,9 @@ pub struct Core {
     /// Pending connect-approval requests. Populated by `request_connect` (the
     /// agent's `connect` tool); drained by the `resolve_connect` command.
     pub(crate) pending_connects: PendingConnects,
+    /// What each connection's last sensitivity scan saw; lets the agent path
+    /// rescan when its SQL names a relation that changed since.
+    pub(crate) scans: ScanIndex,
 }
 
 impl Core {
@@ -78,6 +82,7 @@ impl Core {
         let pending_migrations = PendingMigrations::default();
         let pending_connects = PendingConnects::default();
         let redactor_cache = RedactorCache::default();
+        let scans = ScanIndex::default();
         let human = Core {
             meta: meta.clone(),
             pools: pools.clone(),
@@ -89,6 +94,7 @@ impl Core {
             pending_permissions: pending_permissions.clone(),
             pending_migrations: pending_migrations.clone(),
             pending_connects: pending_connects.clone(),
+            scans: scans.clone(),
         };
         let agent = Core {
             meta,
@@ -101,6 +107,7 @@ impl Core {
             pending_permissions,
             pending_migrations,
             pending_connects,
+            scans,
         };
         (human, agent)
     }

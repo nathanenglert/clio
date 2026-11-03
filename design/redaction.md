@@ -117,7 +117,12 @@ toggle does not exist for the MCP code path. This is enforced at the call site o
 
 When a new connection is established (or an existing one reconnects and notices a schema
 delta), the core runs a **heuristic classifier** over the schema and produces *suggested*
-classifications.
+classifications. It also reruns before an agent's SQL runs whenever that SQL names a
+relation whose columns changed since the last scan (a new table or column, a rename, a
+type change), including changes made outside the workbench.
+
+The classifier **fails closed**: a column it can't vouch for is redacted until a human
+marks it safe.
 
 ### Heuristic inputs
 
@@ -125,9 +130,22 @@ classifications.
   `birth_date`, `mrn`, `diagnosis`, `card_*`, `cvv`, `address*`, `first_name`,
   `last_name`, `patient_*`, `npi`, etc. Maintained as an editable list in code; not
   user-configurable in v0.
-- **Postgres type hints**: `text`/`varchar` columns named generically (`notes`,
-  `comments`, `description`) on tables flagged as health/billing get a "review" hint
-  but no auto-classification.
+- **Postgres types**: every text-like column (text, varchar, char, citext, json, jsonb,
+  xml, bytea, tsvector, hstore, and arrays of them) that nothing else flagged is a
+  Pending PII suggestion, reason `unreviewed text: redacted until marked safe`. Free text
+  is where identifiers hide under names like `notes`, `payload` or `patient`.
+- **Sampled values**: the scan reads up to 200 rows per table (read-only transaction,
+  2 s timeout per table, 20 s per scan) for the columns where values can change the
+  outcome. Detectors look for SSNs, email addresses, phone numbers and Luhn-valid card
+  numbers. A hit sharpens a text column's reason (`sampled values include SSNs (3 of
+  200)`), and an `int8`/`numeric` column whose values are mostly card numbers becomes
+  PCI. Only detector tallies leave the sampler; values are never stored or logged. Each
+  column is sampled once per identity; tables not reached in time are sampled next scan.
+- **Inheritance**: a view or materialized view column that copies or derives from a
+  classified column is classified too (from its `pg_get_viewdef` definition; a shape
+  lineage can't trace column by column classifies every column). A write that copies
+  classified data (`CREATE TABLE … AS`, `SELECT … INTO`, `INSERT … SELECT`, `UPDATE …
+  SET`) classifies the target columns, on both the human and agent paths.
 - **Comment / COMMENT ON COLUMN**: if a column comment contains `phi`, `pii`, `pci`,
   `sensitive`, or `redact`, treat as a strong signal.
 
@@ -147,12 +165,17 @@ classifications.
 ```
 
 4. The user opens the review panel ([next section](#review-panel)). Accepting promotes
-   pending → confirmed (solid border). Rejecting removes the classification entirely.
+   pending → confirmed (solid border). Marking safe stops redacting the column, and the
+   classifier never suggests it again.
 5. Until reviewed, suggestions stay live (redacted). This errs toward more redaction,
    matching the "read-only is the safe default" rule from `README.md`.
 
-The classifier never auto-confirms. The only state transitions are: `none → pending`
-(classifier), `pending → confirmed | none` (user), `confirmed → none` (user).
+The classifier never auto-confirms. The state transitions are: `none → pending`
+(classifier or inheritance), `pending → confirmed | safe` (user), `confirmed → safe`
+(user), `safe → confirmed` (user), and `safe → pending` (the column was dropped and
+recreated, changed type, or had classified data copied into it). A classification
+follows its column across a rename (same table OID and attribute number) and is removed
+when its column is dropped.
 
 ---
 
@@ -170,10 +193,9 @@ A focused modal, 800px wide, scrollable list of classified columns grouped by ta
 ```
 ┌─ Sensitivity · lassomd-staging ────────────────────────────────────────────────┐
 │                                                                                │
-│   12 classified · 8 pending · 4 confirmed                                      │
-│   [ Group by: Table ▾ ]   [ Filter: All ▾ ]            [ + Add manually ]      │
+│   12 redacted · 8 pending · 4 confirmed · 3 safe   [ Filter: All ▾ ]         │
 │                                                                                │
-│ ┌─ public.patients ─────────────────────────────────────────────────────────┐ │
+│ ┌─ public.patients ─────────────────────────────────── [ Mark table safe ] ─┐ │
 │ │                                                                            │ │
 │ │  ◌ first_name      text         PII   ?  · matched "name"   [✓] [✗]      │ │
 │ │  ◌ last_name       text         PII   ?  · matched "name"   [✓] [✗]      │ │
@@ -181,7 +203,8 @@ A focused modal, 800px wide, scrollable list of classified columns grouped by ta
 │ │  ◌ phone_e164      text         PII   ✓  · confirmed        [PII ▾] [✗]  │ │
 │ │  ◌ email           text         PII   ?  · matched "email"  [✓] [✗]      │ │
 │ │  ◌ ssn             text         PII   ?  · matched "ssn"    [✓] [✗]      │ │
-│ │    notes           text          —       · review suggested  [Classify ▾]│ │
+│ │  ◌ notes           text         PII   ?  · unreviewed text  [✓] [✗]      │ │
+│ │    created_by      text         SAFE     · marked safe       [ Redact ]  │ │
 │ │                                                                            │ │
 │ └────────────────────────────────────────────────────────────────────────────┘ │
 │                                                                                │
@@ -191,7 +214,7 @@ A focused modal, 800px wide, scrollable list of classified columns grouped by ta
 │ │  ...                                                                       │ │
 │ └────────────────────────────────────────────────────────────────────────────┘ │
 │                                                                                │
-│                                              [ Reject all pending ] [ Done ]   │
+│                                                                     [ Done ]   │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -202,16 +225,15 @@ A focused modal, 800px wide, scrollable list of classified columns grouped by ta
 - Category pill: 10px mono, `--privacy-soft` background, `--privacy` text. Pending rows
   show `?` after the pill; confirmed rows show `✓`.
 - Reason line in 10.5px `--text-muted` to the right of the pill.
-- Per-row actions: `[✓]` confirm (pending only), `[✗]` remove, `[Category ▾]` change
-  category (confirmed only).
-- Unclassified columns that the classifier flagged as worth reviewing (low-confidence
-  hits like generic `notes` fields) show with no glyph and a single `[Classify ▾]`
-  button. They are *not* redacted unless classified.
+- Per-row actions: `[✓]` confirm (pending only), `[Category ▾]` change category, `[✗]`
+  mark safe.
+- Safe rows show a muted `SAFE` pill, no glyph, and a single `[Redact]` button, which
+  confirms the classification again.
 
 ### Group / filter
 
 - **Group by**: Table (default), Category, Status (pending / confirmed).
-- **Filter**: All, Pending only, Confirmed only, Unclassified.
+- **Filter**: All, Pending, Confirmed, Safe.
 
 ### Manual add
 
@@ -221,8 +243,9 @@ known to contain PHI).
 
 ### Bulk actions
 
-A small toolbar appears when ≥2 rows are selected via row checkbox:
-`[Confirm N]` · `[Remove N]` · `[Change category to ▾]`.
+Each table group's header has `[Mark table safe]`, which marks every redacted column in
+that table safe. Fail-closed defaults make this the common review step on a large
+schema.
 
 ---
 
@@ -401,16 +424,19 @@ pub struct Classification {
     pub table: String,
     pub column: String,
     pub category: Category,         // PHI | PCI | PII
-    pub status: ClassificationStatus, // Pending | Confirmed
+    pub status: ClassificationStatus, // Pending | Confirmed | Safe
     pub reason: String,             // human-readable, from classifier or "manual"
     pub created_at: DateTime<Utc>,
 }
 
 pub enum Category { Phi, Pci, Pii }
-pub enum ClassificationStatus { Pending, Confirmed }
+pub enum ClassificationStatus { Pending, Confirmed, Safe }
 ```
 
 Stored as JSON in the existing connection config file. The secret stays in the keychain.
+The metadata SQLite also keeps `sensitivity_scanned`: every column the last scan saw, with
+its table OID, attribute number and type, so the next scan can follow renames, notice
+recreated columns, and skip re-sampling.
 
 ---
 
@@ -506,9 +532,14 @@ with `reveal: false`. Compile-time literal, not a parameter the tool exposes.
   gains a footnote: `Exporting masked values. Toggle View > Reveal to export real data.`
 - **Connection disconnect mid-query**: classification policy is loaded once per query
   at the redactor step; mid-query disconnect doesn't change behavior.
-- **Schema change** (column dropped / renamed): the classification entry becomes stale.
-  The next `classify_schema` call sweeps stale entries (entry has no matching column) and
-  removes them silently. Renamed columns produce a new pending suggestion.
+- **Schema change** (column dropped / renamed): a rename keeps the classification (the
+  scan matches the column by table OID and attribute number). A dropped column's entry is
+  removed. A dropped-and-recreated Safe column goes back to pending.
+- **Recreated tables**: queries on the redacted paths are re-described on every run
+  rather than cached as prepared statements, because a cached statement keeps the old
+  table OID in its column metadata and the redactor matches columns by OID.
+- **Temporary tables** created by a copying write aren't classified: only the pooled
+  connection that made one can see it.
 
 ---
 

@@ -131,7 +131,7 @@ fn op_table(op: &MutationOp) -> (&str, &str) {
 
 /// Double-quote a Postgres identifier (schema/table/column).
 /// Escapes embedded double-quotes per the standard.
-fn quote_ident(s: &str) -> String {
+pub(super) fn quote_ident(s: &str) -> String {
     let escaped = s.replace('"', "\"\"");
     format!("\"{escaped}\"")
 }

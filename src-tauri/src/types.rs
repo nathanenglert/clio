@@ -452,6 +452,10 @@ pub enum ClassificationStatus {
     Pending,
     /// User-reviewed and accepted.
     Confirmed,
+    /// User-reviewed: not sensitive. Never redacted, and the classifier never
+    /// suggests the column again (until it is dropped and recreated, or its
+    /// type changes).
+    Safe,
 }
 
 impl ClassificationStatus {
@@ -459,12 +463,14 @@ impl ClassificationStatus {
         match self {
             ClassificationStatus::Pending => "pending",
             ClassificationStatus::Confirmed => "confirmed",
+            ClassificationStatus::Safe => "safe",
         }
     }
     pub fn from_db(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(ClassificationStatus::Pending),
             "confirmed" => Some(ClassificationStatus::Confirmed),
+            "safe" => Some(ClassificationStatus::Safe),
             _ => None,
         }
     }
@@ -492,10 +498,10 @@ pub struct ClassifyOutcome {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClassificationAction {
-    /// Pending → Confirmed.
+    /// Pending or Safe → Confirmed.
     Confirm,
-    /// Remove the classification entirely.
-    Remove,
+    /// Pending or Confirmed → Safe: stop redacting and stop suggesting it.
+    MarkSafe,
     /// Change category; leaves status as-is.
     SetCategory { category: Category },
     /// Insert a new Confirmed classification (manual add path).

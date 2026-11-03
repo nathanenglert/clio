@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::time::Instant;
 
@@ -7,6 +7,7 @@ use crate::types::{ColumnMeta, QueryResult, RedactionMeta};
 
 use super::lineage;
 use super::redactor::{fake_for, RedactorView};
+use super::sensitivity;
 use super::Core;
 
 const ROW_CAP: usize = 1000;
@@ -216,6 +217,9 @@ pub(super) async fn run_decoded(
 ) -> Result<QueryResult> {
     let started = Instant::now();
     let pool = core.pool(conn).await?;
+    // An agent may name a table or column created since the last scan;
+    // rescan first so it never reads one the classifier hasn't seen.
+    sensitivity::ensure_scan_current(core, conn, &pool, sql).await?;
 
     // Look up the redactor view *before* running the query so we can use
     // the per-column source info (relation_id / attribute_no) reported by
@@ -249,6 +253,12 @@ pub(super) async fn run_decoded(
         Ok(r) => r,
         Err(e) => return Err(sanitize_db_error(core, classified, e)),
     };
+    if !read_only {
+        // A write that copied classified values classifies its target.
+        sensitivity::inherit_from_write(core, conn, &pool, sql)
+            .await
+            .with_context(|| "the statement ran, but classifying the data it copied failed")?;
+    }
 
     // Build per-column meta and a redaction plan. Three cases per column:
     //  • OID-tagged + classified     → deterministic faker (bare column ref)
@@ -394,7 +404,10 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     use futures_util::TryStreamExt;
-    let mut stream = executor.fetch_many(sqlx::query(sql));
+    // Not a cached prepared statement: its column metadata would keep a
+    // table's old OID after the table is dropped and recreated with the same
+    // shape, and the redactor matches classified columns by that OID.
+    let mut stream = executor.fetch_many(sqlx::query(sql).persistent(false));
     let (mut rows, mut affected) = (Vec::new(), 0);
     while let Some(step) = stream.try_next().await? {
         match step {
