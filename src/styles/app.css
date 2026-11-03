@@ -2443,11 +2443,19 @@ body.dragging-y * { cursor: inherit !important; }
 }
 .sens-group:last-child { border-bottom: none; }
 .sens-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 10px 16px 6px;
   font-size: 11px;
   font-weight: 500;
   color: var(--text-secondary);
   letter-spacing: 0.02em;
+}
+.sens-group-head .spacer { flex: 1; }
+.sens-group-head .editor-btn {
+  padding: 2px 8px;
+  font-size: 10.5px;
 }
 .sens-row {
   display: flex;
@@ -2485,6 +2493,12 @@ body.dragging-y * { cursor: inherit !important; }
   background: var(--privacy-soft);
   color: var(--privacy);
   border: 1px solid var(--privacy-line);
+}
+.sens-row.safe .sens-col { color: var(--text-muted); }
+.sens-cat-pill.safe {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--line-default);
 }
 .sens-status {
   flex: 0 0 14px;

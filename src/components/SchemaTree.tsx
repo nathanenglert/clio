@@ -56,6 +56,7 @@ function buildClassIndex(rows: Classification[]): ClassIndex {
   const byTable = new Map<string, { count: number; pending: number }>();
   const byColumn = new Map<string, Classification>();
   for (const r of rows) {
+    if (r.status === "safe") continue; // reviewed, not redacted
     const tk = `${r.schema}.${r.table}`;
     const ck = `${tk}.${r.column}`;
     byColumn.set(ck, r);
