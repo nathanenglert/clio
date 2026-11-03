@@ -5,8 +5,7 @@
 > **Live PII leak test — 2026-11-02.** Drove the dev build with `tauri-pilot` and attacked a
 > seeded copy of the workbench DB over MCP as the agent. Bare columns, `SELECT *`, and the #36
 > expression/error fixes held. 12 leak paths were confirmed, each returning real values that matched
-> ground truth from psql. The quick wins it found are fixed in #41 (see Done). **Still open, not yet
-> logged as tasks:**
+> ground truth from psql. The quick wins it found are fixed in #41 (see Done). **Still open:**
 > - WHERE/JOIN laundering, e.g. `JOIN generate_series(...) ON ascii(substr(p.ssn,pos,1)) = c.i`
 >   rebuilds every SSN in one query; `lineage.rs`'s own `where_clause_reference_does_not_redact_output`
 >   test allows this.
@@ -14,10 +13,51 @@
 > - Classifier misses on unmatched names (`billing.unpaid_balances.patient`, `appointments.notes`,
 >   `lab_results`).
 >
-> Closing those needs Postgres itself to enforce it: an agent-only role with column-level
-> `REVOKE SELECT` on classified columns.
+> A DB-enforced agent role (column-level `REVOKE SELECT`) isn't an option, so the app closes these
+> itself: fail-closed classification (in progress) and the three tasks in Next.
 
 ## Next
+
+- [ ] **Security (R2 — critical):** Agent SQL still runs over real classified values, so predicates
+  launder them. Redaction only fakes the *output*. WHERE, JOIN, ORDER BY, CASE, row counts, errors
+  and timing all see the real value, e.g. `JOIN generate_series(...) ON ascii(substr(p.ssn,pos,1))
+  = c.i` rebuilds every SSN in one query.
+  - **Fix direction:** mask at the source. Before agent SQL reaches Postgres, rewrite every reference
+    to a classified table as a derived table that swaps each classified column for a keyed hash,
+    e.g. `(SELECT id, encode(sha256($key || convert_to(ssn::text, 'UTF8')), 'hex') AS ssn, … FROM
+    clinical.patients) AS p`.
+    - Key the hash per connection only, not per table or column, so joins on a classified key still
+      match. The redactor maps hashes to fakes on the way out and stops being the security boundary.
+    - Comparisons against real literals (`WHERE email = 'jane@…'`) stop matching. Don't hash the
+      literal for the agent, since that confirms guesses; point it at `propose_query` instead.
+    - The key travels as a bind parameter, so it can reach server logs that record parameters.
+      Acceptable (the DBA can already read the real data), but note it.
+  - Depends on the allowlist below: the rewrite is only safe when every relation reference resolves.
+
+- [ ] **Security (R2 — high):** Agent SQL is screened by a blocklist (`SQL_EXECUTING_FUNCTIONS`,
+  `VALUE_SAMPLING_CATALOGS` in `lineage.rs`), so anything not listed passes. For example,
+  `pg_stat_activity.query` returns the human's editor queries with literal values, and a
+  user-defined function can read a classified table internally.
+  - **Fix direction:** on classified connections, accept only a SQL subset the rewriter fully
+    understands:
+    - `SELECT` with CTEs, joins and subqueries over tables and views the scan knows.
+    - Allowlisted built-in functions only. No user-defined functions, no `pg_sleep`.
+    - Value-free catalogs only (`information_schema`, `pg_class`, `pg_attribute`, `pg_namespace`,
+      `pg_index`, `pg_constraint`). Not `pg_stats*`, `pg_stat_activity`, `pg_stat_statements` or
+      `pg_proc.prosrc`.
+    - Pin `search_path` with `SET LOCAL` inside the agent's read-only transaction, so the rewriter
+      resolves names the way Postgres does.
+    - Refuse everything else with a pointer to `propose_query`, which hands the SQL to the human.
+  - Ships with the source-masking task above and replaces the blocklist.
+
+- [ ] **Security (R2 — medium):** Nothing checks result values before they go to the agent, so an
+  identifier in a column the classifier missed goes out as-is.
+  - **Fix direction:** on the agent path, run the content detectors from fail-closed classification
+    (SSN shape, Luhn-valid card numbers, email, phone) over unredacted cells before the result
+    crosses `bridge.rs`. On a hit, fake the cell and queue a Pending classification for its source
+    column.
+  - Backstop only: it can't catch predicate laundering, where the output is counts or booleans. The
+    source-masking task covers that.
 
 ## Later
 
