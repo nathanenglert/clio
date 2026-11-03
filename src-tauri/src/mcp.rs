@@ -1,4 +1,4 @@
-//! rmcp 1.7 server — a thin proxy. Each DB-touching tool forwards a
+//! rmcp 2.1 server — a thin proxy. Each DB-touching tool forwards a
 //! `ToolCall` over the Unix socket to the running UI process (see
 //! `bridge.rs`), which owns the only Postgres pool and credentials and runs
 //! the call only if a human has connected that database. This process holds no
@@ -102,7 +102,7 @@ impl McpServer {
         let value = self.proxy.call(call).await.map_err(err)?;
         let json = serde_json::to_string_pretty(&value)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 }
 
