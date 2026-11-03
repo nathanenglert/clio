@@ -25,7 +25,7 @@ use sqlx::Row;
 use tokio::sync::Mutex;
 
 use crate::connections;
-use crate::types::{Category, Classification};
+use crate::types::{Category, Classification, ClassificationStatus};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -93,7 +93,13 @@ async fn build_view(
     conn_name: &str,
     connection_id: &str,
 ) -> Result<RedactorView> {
-    let classifications = connections::list_classifications(meta, connection_id).await?;
+    // Columns the human marked Safe never redact.
+    let classifications: Vec<Classification> =
+        connections::list_classifications(meta, connection_id)
+            .await?
+            .into_iter()
+            .filter(|c| c.status != ClassificationStatus::Safe)
+            .collect();
 
     if classifications.is_empty() {
         // An empty view never redacts (`view_for` returns `None`), so the

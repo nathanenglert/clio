@@ -188,19 +188,246 @@ pub(super) fn untraceable_reference(sql: &str) -> Option<&'static str> {
     }
 }
 
-/// Whether `sql` touches any classified table — read, joined, written, or
-/// referenced in a subquery. Unparseable SQL falls back to a text match, so
-/// this only ever over-reports. Used to keep a write that could copy classified
-/// values into an unclassified place (`INSERT INTO public.t SELECT ssn …`) from
-/// riding a row-bounded allow rule.
-pub(super) fn references_classified_table(sql: &str, view: &RedactorView) -> bool {
+/// Whether a write *reads* classified data: a classified column or row in any
+/// expression (SET values, WHERE, ON CONFLICT, RETURNING), a classified table
+/// as a read source (INSERT … SELECT, UPDATE … FROM, DELETE … USING), or a
+/// subquery (lineage-opaque). Writing literals into a classified table doesn't
+/// count. Unparseable SQL falls back to a text match, and write shapes not
+/// analyzed here count whenever they touch a classified table, so this only
+/// ever over-reports. Used to keep a write that could copy classified values
+/// somewhere unredacted (`INSERT INTO public.t SELECT ssn …`) from riding a
+/// row-bounded allow rule.
+pub(super) fn write_reads_classified(sql: &str, view: &RedactorView) -> bool {
     let dialect = PostgreSqlDialect {};
-    match Parser::parse_sql(&dialect, sql) {
-        Ok(stmts) => stmts
-            .iter()
-            .any(|s| statement_tables(s).iter().any(|t| view.by_name.contains_key(t))),
-        Err(_) => sql_mentions_classified_table(sql, view),
+    let stmts = match Parser::parse_sql(&dialect, sql) {
+        Ok(s) => s,
+        Err(_) => return sql_mentions_classified_table(sql, view),
+    };
+    let [stmt] = stmts.as_slice() else {
+        return any_classified_relation(&stmts, view);
+    };
+    let tables = statement_tables(stmt);
+    if !tables.iter().any(|t| view.by_name.contains_key(t)) {
+        return false;
     }
+    if classified_table_renames_columns(stmt, view) {
+        return true;
+    }
+    let sources = write_sources(stmt);
+    let (cols, refs) = build_scope(&tables, &sources, view);
+    let mut probe = SensitiveExprVisitor {
+        sensitive_cols: &cols,
+        sensitive_table_refs: &refs,
+    };
+    match stmt {
+        Statement::Insert(i) => {
+            i.source
+                .as_ref()
+                .is_some_and(|q| any_classified_relation(q, view) || q.visit(&mut probe).is_break())
+                || i.on.visit(&mut probe).is_break()
+                || i.returning.visit(&mut probe).is_break()
+        }
+        Statement::Update(u) => {
+            update_from_tables(u).is_some_and(|f| f.iter().any(|t| any_classified_relation(*t, view)))
+                || u.assignments.visit(&mut probe).is_break()
+                || u.selection.visit(&mut probe).is_break()
+                || u.returning.visit(&mut probe).is_break()
+        }
+        Statement::Delete(d) => {
+            d.using
+                .as_ref()
+                .is_some_and(|u| u.iter().any(|t| any_classified_relation(t, view)))
+                || d.selection.visit(&mut probe).is_break()
+                || d.returning.visit(&mut probe).is_break()
+        }
+        _ => true,
+    }
+}
+
+/// Lowercased names of every relation `sql` references (see
+/// [`statement_tables`]). Empty when the SQL doesn't parse.
+pub(super) fn relation_names(sql: &str) -> HashSet<String> {
+    match Parser::parse_sql(&PostgreSqlDialect {}, sql) {
+        Ok(stmts) => stmts.iter().flat_map(statement_tables).collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+/// What one output column of a stored query (a view, `CREATE TABLE AS`,
+/// `SELECT INTO`, `INSERT … SELECT`, an UPDATE's SET value) carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StoredColumn {
+    /// Nothing classified.
+    Clean,
+    /// A bare copy of the classified column with this (lowercased) name.
+    Copy(String),
+    /// An expression over classified columns or rows.
+    Derived,
+}
+
+/// Per-column lineage of a stored query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StoredLineage {
+    /// No classified table is referenced.
+    Clean,
+    /// One entry per output column, in order.
+    Columns(Vec<StoredColumn>),
+    /// A classified table is in scope but the shape can't be traced column by
+    /// column (CTE, set operation, derived table, wildcard): treat every
+    /// output column as classified.
+    Opaque,
+}
+
+/// Per-column lineage of `q`'s output. Name-based like the rest of this module.
+pub(super) fn query_lineage(q: &Query, view: &RedactorView) -> StoredLineage {
+    if !any_classified_relation(q, view) {
+        return StoredLineage::Clean;
+    }
+    let SetExpr::Select(select) = q.body.as_ref() else {
+        return StoredLineage::Opaque;
+    };
+    let plain = select.from.iter().all(|twj| {
+        is_plain_table(&twj.relation) && twj.joins.iter().all(|j| is_plain_table(&j.relation))
+    });
+    if q.with.is_some() || !plain || classified_table_renames_columns(q, view) {
+        return StoredLineage::Opaque;
+    }
+    let mut tables = HashSet::new();
+    let _ = sqlparser::ast::visit_relations(q, |name| {
+        if let Some(t) = last_ident(name) {
+            tables.insert(t);
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    let sources: Vec<&TableWithJoins> = select.from.iter().collect();
+    let (cols, refs) = build_scope(&tables, &sources, view);
+    let mut out = Vec::with_capacity(select.projection.len());
+    for item in &select.projection {
+        let e = match item {
+            SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => e,
+            _ => return StoredLineage::Opaque,
+        };
+        out.push(expr_lineage(unwrap_nested(e), &cols, &refs));
+    }
+    StoredLineage::Columns(out)
+}
+
+fn expr_lineage(e: &Expr, cols: &HashSet<String>, refs: &HashSet<String>) -> StoredColumn {
+    let bare = match e {
+        Expr::Identifier(i) => Some(i.value.to_ascii_lowercase()),
+        Expr::CompoundIdentifier(parts) => parts.last().map(|p| p.value.to_ascii_lowercase()),
+        _ => None,
+    };
+    match bare {
+        // `SELECT p` is a whole classified row.
+        Some(n) if matches!(e, Expr::Identifier(_)) && refs.contains(&n) => StoredColumn::Derived,
+        Some(n) if cols.contains(&n) => StoredColumn::Copy(n),
+        Some(_) => StoredColumn::Clean,
+        None if expr_is_sensitive(e, cols, refs) => StoredColumn::Derived,
+        None => StoredColumn::Clean,
+    }
+}
+
+/// Lineage of a view's stored definition (`pg_get_viewdef`). A definition the
+/// parser rejects is opaque if it mentions a classified table.
+pub(super) fn definition_lineage(def: &str, view: &RedactorView) -> StoredLineage {
+    match Parser::parse_sql(&PostgreSqlDialect {}, def).as_deref() {
+        Ok([Statement::Query(q)]) => query_lineage(q, view),
+        _ if sql_mentions_classified_table(def, view) => StoredLineage::Opaque,
+        _ => StoredLineage::Clean,
+    }
+}
+
+/// A write that stores query output in a table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StoredWrite {
+    /// The target table as written (quotes kept), for `to_regclass`.
+    pub target: String,
+    /// The target columns named in the statement, folded the way Postgres
+    /// folds identifiers. `None` means every column, in table order.
+    pub columns: Option<Vec<String>>,
+    pub lineage: StoredLineage,
+}
+
+/// The stored write `sql` performs, if it is one: `CREATE TABLE … AS`,
+/// `SELECT … INTO`, `INSERT … SELECT/VALUES` or `UPDATE … SET`.
+pub(super) fn stored_write(sql: &str, view: &RedactorView) -> Option<StoredWrite> {
+    let stmts = Parser::parse_sql(&PostgreSqlDialect {}, sql).ok()?;
+    let [stmt] = stmts.as_slice() else {
+        return None;
+    };
+    match stmt {
+        Statement::CreateTable(ct) => Some(StoredWrite {
+            target: ct.name.to_string(),
+            columns: None,
+            lineage: query_lineage(ct.query.as_ref()?, view),
+        }),
+        Statement::Query(q) => match q.body.as_ref() {
+            SetExpr::Select(s) => Some(StoredWrite {
+                target: s.into.as_ref()?.name.to_string(),
+                columns: None,
+                lineage: query_lineage(q, view),
+            }),
+            _ => None,
+        },
+        Statement::Insert(i) => {
+            let TableObject::TableName(name) = &i.table else {
+                return None;
+            };
+            let columns = (!i.columns.is_empty())
+                .then(|| i.columns.iter().filter_map(folded_last).collect());
+            Some(StoredWrite {
+                target: name.to_string(),
+                columns,
+                lineage: query_lineage(i.source.as_ref()?, view),
+            })
+        }
+        Statement::Update(u) => {
+            let TableFactor::Table { name, .. } = &u.table.relation else {
+                return None;
+            };
+            let tables = statement_tables(stmt);
+            let (cols, refs) = build_scope(&tables, &write_sources(stmt), view);
+            let classified = tables.iter().any(|t| view.by_name.contains_key(t));
+            let mut columns = Vec::new();
+            let mut lineage = Vec::new();
+            for a in &u.assignments {
+                let targets = match &a.target {
+                    sqlparser::ast::AssignmentTarget::ColumnName(n) => vec![n],
+                    sqlparser::ast::AssignmentTarget::Tuple(ns) => ns.iter().collect(),
+                };
+                let value = match expr_lineage(unwrap_nested(&a.value), &cols, &refs) {
+                    // A tuple target takes its columns from one opaque value.
+                    StoredColumn::Copy(_) if targets.len() > 1 => StoredColumn::Derived,
+                    v => v,
+                };
+                for t in targets {
+                    columns.extend(folded_last(t));
+                    lineage.push(value.clone());
+                }
+            }
+            Some(StoredWrite {
+                target: name.to_string(),
+                columns: Some(columns),
+                lineage: if classified {
+                    StoredLineage::Columns(lineage)
+                } else {
+                    StoredLineage::Clean
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The last part of `name`, folded the way Postgres folds an identifier:
+/// lowercased unless quoted.
+fn folded_last(name: &ObjectName) -> Option<String> {
+    name.0.last().and_then(|p| match p {
+        ObjectNamePart::Identifier(i) if i.quote_style.is_some() => Some(i.value.clone()),
+        ObjectNamePart::Identifier(i) => Some(i.value.to_ascii_lowercase()),
+        _ => None,
+    })
 }
 
 /// SELECT analysis. Fails closed on CTEs, set operations, and non-plain FROM
@@ -254,7 +481,7 @@ fn bare_ident(item: &SelectItem) -> Option<String> {
 }
 
 /// Whether any classified table in `stmt` carries a column-alias list.
-fn classified_table_renames_columns(stmt: &Statement, view: &RedactorView) -> bool {
+fn classified_table_renames_columns<V: Visit>(stmt: &V, view: &RedactorView) -> bool {
     struct Finder<'a>(&'a RedactorView);
     impl Visitor for Finder<'_> {
         type Break = ();
@@ -642,19 +869,98 @@ mod tests {
     }
 
     #[test]
-    fn detects_writes_that_touch_classified_tables() {
+    fn detects_writes_that_read_classified_data() {
         let v = view(PATIENTS);
         for sql in [
             "INSERT INTO public.audit_log (target_id) SELECT ssn FROM clinical.patients RETURNING target_id",
+            "INSERT INTO public.t SELECT count(*) FROM patients",
             "UPDATE public.leads SET note = (SELECT email FROM patients LIMIT 1)",
             "UPDATE patients SET notes = ssn",
+            "UPDATE patients p SET notes = to_jsonb(p)::text",
+            "UPDATE public.leads l SET note = p.id FROM patients p WHERE p.id = l.id",
+            "UPDATE patients SET notes = 'x' WHERE email LIKE 'a%'",
+            "DELETE FROM patients WHERE ssn LIKE '1%'",
+            "DELETE FROM public.leads l USING patients p WHERE p.id = l.id",
             "INSERT INTO patients (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET notes = patients.ssn",
             "WITH c AS (SELECT ssn FROM patients) INSERT INTO public.t SELECT * FROM c",
+            "INSERT INTO patients AS p (id, ssn) VALUES (1, 'x') RETURNING lower(email)",
         ] {
-            assert!(references_classified_table(sql, &v), "{sql}");
+            assert!(write_reads_classified(sql, &v), "{sql}");
         }
-        assert!(!references_classified_table("UPDATE public.leads SET status = 'x'", &v));
-        assert!(!references_classified_table("INSERT INTO public.t VALUES (1)", &v));
+        for sql in [
+            "UPDATE public.leads SET status = 'x'",
+            "INSERT INTO public.t VALUES (1)",
+            "INSERT INTO patients (id, ssn) VALUES (1, '111-22-3333')",
+            "UPDATE patients SET notes = 'x' WHERE id = 1",
+            "DELETE FROM patients WHERE id = 1",
+        ] {
+            assert!(!write_reads_classified(sql, &v), "{sql}");
+        }
+    }
+
+    fn stored(sql: &str) -> Option<StoredWrite> {
+        stored_write(sql, &view(PATIENTS))
+    }
+
+    #[test]
+    fn stored_writes_trace_each_target_column() {
+        use StoredColumn::*;
+        let w = stored("CREATE TABLE scratch AS SELECT p.id, p.ssn AS x, upper(email) FROM patients p")
+            .unwrap();
+        assert_eq!(w.target, "scratch");
+        assert_eq!(w.columns, None);
+        assert_eq!(
+            w.lineage,
+            StoredLineage::Columns(vec![Clean, Copy("ssn".into()), Derived])
+        );
+
+        let w = stored("SELECT id, ssn INTO TABLE public.copy FROM patients").unwrap();
+        assert_eq!(w.target, "public.copy");
+        assert_eq!(w.lineage, StoredLineage::Columns(vec![Clean, Copy("ssn".into())]));
+
+        let w = stored(r#"INSERT INTO audit (a, "B") SELECT id, ssn FROM patients"#).unwrap();
+        assert_eq!(w.columns, Some(vec!["a".to_string(), "B".to_string()]));
+        assert_eq!(w.lineage, StoredLineage::Columns(vec![Clean, Copy("ssn".into())]));
+
+        let w = stored("UPDATE leads SET note = p.email, status = 'x' FROM patients p").unwrap();
+        assert_eq!(w.columns, Some(vec!["note".to_string(), "status".to_string()]));
+        assert_eq!(w.lineage, StoredLineage::Columns(vec![Copy("email".into()), Clean]));
+    }
+
+    #[test]
+    fn stored_writes_fail_closed_or_stay_clean() {
+        // Wildcards and CTEs over a classified table can't be traced per column.
+        assert_eq!(stored("CREATE TABLE t AS SELECT * FROM patients").unwrap().lineage, StoredLineage::Opaque);
+        assert_eq!(
+            stored("CREATE TABLE t AS WITH c AS (SELECT ssn FROM patients) SELECT ssn FROM c")
+                .unwrap()
+                .lineage,
+            StoredLineage::Opaque
+        );
+        // Literals and unclassified sources carry nothing.
+        assert_eq!(stored("INSERT INTO patients (ssn) VALUES ('x')").unwrap().lineage, StoredLineage::Clean);
+        assert_eq!(stored("CREATE TABLE t AS SELECT * FROM orders").unwrap().lineage, StoredLineage::Clean);
+        assert!(stored("SELECT ssn FROM patients").is_none());
+        assert!(stored("DELETE FROM patients").is_none());
+    }
+
+    #[test]
+    fn view_definitions_trace_each_column() {
+        use StoredColumn::*;
+        let v = view(PATIENTS);
+        // pg_get_viewdef output: expanded, qualified, newline-separated.
+        let def = " SELECT p.id,\n    p.ssn AS ident,\n    (p.email)::text AS contact\n   FROM clinical.patients p;";
+        assert_eq!(
+            definition_lineage(def, &v),
+            StoredLineage::Columns(vec![Clean, Copy("ssn".into()), Derived])
+        );
+        assert_eq!(definition_lineage(" SELECT o.id FROM orders o;", &v), StoredLineage::Clean);
+        assert_eq!(
+            definition_lineage(" SELECT p.id FROM patients p UNION SELECT 1;", &v),
+            StoredLineage::Opaque
+        );
+        // A definition the parser rejects is opaque when it names a classified table.
+        assert_eq!(definition_lineage("SELECT FROM patients WHERE (", &v), StoredLineage::Opaque);
     }
 
     #[test]

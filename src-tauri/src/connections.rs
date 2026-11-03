@@ -229,13 +229,33 @@ pub async fn open_metadata() -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    sqlx::query(SCANNED_DDL).execute(&pool).await?;
 
     Ok(pool)
 }
 
+/// Every column the sensitivity scan saw last time, with its Postgres
+/// identity. Lets the next scan carry a classification across a rename (same
+/// `(table_oid, attnum)`, new name), notice a dropped-and-recreated column, and
+/// skip re-sampling columns it already sampled.
+const SCANNED_DDL: &str = r#"
+    CREATE TABLE IF NOT EXISTS sensitivity_scanned (
+        connection_id TEXT NOT NULL,
+        schema_name   TEXT NOT NULL,
+        table_name    TEXT NOT NULL,
+        column_name   TEXT NOT NULL,
+        table_oid     INTEGER NOT NULL,
+        attnum        INTEGER NOT NULL,
+        type_oid      INTEGER NOT NULL,
+        sampled       INTEGER NOT NULL,
+        PRIMARY KEY (connection_id, schema_name, table_name, column_name),
+        FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
+    )"#;
+
 /// Test-only metadata DB: an in-memory SQLite with just the tables the
-/// gated-runner path reads — `connections` (for [`get`]) and
-/// `sensitivity_classifications` (for the redactor view). `max_connections(1)`
+/// gated-runner path reads — `connections` (for [`get`]),
+/// `sensitivity_classifications` (for the redactor view) and
+/// `sensitivity_scanned` (for the sensitivity scan). `max_connections(1)`
 /// keeps the single in-memory database alive for the pool's lifetime (a
 /// shared `:memory:` would otherwise vanish between connections). Kept in sync
 /// with the DDL in [`open_metadata`] by the integration tests, which fail
@@ -277,6 +297,7 @@ pub(crate) async fn open_metadata_in_memory() -> Result<SqlitePool> {
     )
     .execute(&pool)
     .await?;
+    sqlx::query(SCANNED_DDL).execute(&pool).await?;
     Ok(pool)
 }
 
@@ -512,6 +533,143 @@ pub async fn delete_classification(
     .execute(pool)
     .await
     .with_context(|| format!("delete classification {schema}.{table}.{column}"))?;
+    Ok(())
+}
+
+/// Set a classification back to Pending with a new reason. Used when a column
+/// the human marked Safe starts holding classified data.
+pub async fn set_classification_pending(
+    pool: &SqlitePool,
+    connection_id: &str,
+    schema: &str,
+    table: &str,
+    column: &str,
+    reason: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"UPDATE sensitivity_classifications
+              SET status = 'pending', reason = ?5
+            WHERE connection_id = ?1
+              AND schema_name = ?2
+              AND table_name = ?3
+              AND column_name = ?4"#,
+    )
+    .bind(connection_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .bind(reason)
+    .execute(pool)
+    .await
+    .with_context(|| format!("reset classification {schema}.{table}.{column}"))?;
+    Ok(())
+}
+
+/// Move a classification to a column's new name after a rename.
+pub async fn rename_classification(
+    pool: &SqlitePool,
+    connection_id: &str,
+    from: (&str, &str, &str),
+    to: (&str, &str, &str),
+) -> Result<()> {
+    sqlx::query(
+        r#"UPDATE sensitivity_classifications
+              SET schema_name = ?5, table_name = ?6, column_name = ?7
+            WHERE connection_id = ?1
+              AND schema_name = ?2
+              AND table_name = ?3
+              AND column_name = ?4"#,
+    )
+    .bind(connection_id)
+    .bind(from.0)
+    .bind(from.1)
+    .bind(from.2)
+    .bind(to.0)
+    .bind(to.1)
+    .bind(to.2)
+    .execute(pool)
+    .await
+    .with_context(|| format!("rename classification {}.{}.{}", from.0, from.1, from.2))?;
+    Ok(())
+}
+
+/// One column as the last sensitivity scan saw it. See [`SCANNED_DDL`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannedColumn {
+    pub schema: String,
+    pub table: String,
+    pub column: String,
+    pub table_oid: i32,
+    pub attnum: i16,
+    pub type_oid: i32,
+    pub sampled: bool,
+}
+
+pub async fn list_scanned(pool: &SqlitePool, connection_id: &str) -> Result<Vec<ScannedColumn>> {
+    let rows = sqlx::query(
+        r#"SELECT schema_name, table_name, column_name, table_oid, attnum, type_oid, sampled
+           FROM sensitivity_scanned
+           WHERE connection_id = ?1"#,
+    )
+    .bind(connection_id)
+    .fetch_all(pool)
+    .await
+    .with_context(|| "list scanned columns")?;
+    Ok(rows
+        .iter()
+        .map(|r| ScannedColumn {
+            schema: r.get("schema_name"),
+            table: r.get("table_name"),
+            column: r.get("column_name"),
+            table_oid: r.get::<i64, _>("table_oid") as i32,
+            attnum: r.get::<i64, _>("attnum") as i16,
+            type_oid: r.get::<i64, _>("type_oid") as i32,
+            sampled: r.get::<i64, _>("sampled") != 0,
+        })
+        .collect())
+}
+
+/// Apply one scan's changes to the scanned-column record in a transaction:
+/// upsert `changed`, delete the `(schema, table, column)` keys in `removed`.
+pub async fn update_scanned(
+    pool: &SqlitePool,
+    connection_id: &str,
+    changed: &[ScannedColumn],
+    removed: &[(String, String, String)],
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    for (schema, table, column) in removed {
+        sqlx::query(
+            r#"DELETE FROM sensitivity_scanned
+                WHERE connection_id = ?1 AND schema_name = ?2
+                  AND table_name = ?3 AND column_name = ?4"#,
+        )
+        .bind(connection_id)
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for c in changed {
+        sqlx::query(
+            r#"INSERT OR REPLACE INTO sensitivity_scanned
+                  (connection_id, schema_name, table_name, column_name,
+                   table_oid, attnum, type_oid, sampled)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+        )
+        .bind(connection_id)
+        .bind(&c.schema)
+        .bind(&c.table)
+        .bind(&c.column)
+        .bind(c.table_oid as i64)
+        .bind(c.attnum as i64)
+        .bind(c.type_oid as i64)
+        .bind(c.sampled as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await.with_context(|| "record scanned columns")?;
     Ok(())
 }
 
