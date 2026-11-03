@@ -286,9 +286,7 @@ pub(super) fn query_lineage(q: &Query, view: &RedactorView) -> StoredLineage {
     let SetExpr::Select(select) = q.body.as_ref() else {
         return StoredLineage::Opaque;
     };
-    let plain = select.from.iter().all(|twj| {
-        is_plain_table(&twj.relation) && twj.joins.iter().all(|j| is_plain_table(&j.relation))
-    });
+    let plain = select.from.iter().all(plain_tables_only);
     if q.with.is_some() || !plain || classified_table_renames_columns(q, view) {
         return StoredLineage::Opaque;
     }
@@ -550,6 +548,22 @@ fn is_plain_table(tf: &TableFactor) -> bool {
     matches!(tf, TableFactor::Table { .. })
 }
 
+/// Whether `twj` joins only plain tables, looking through parenthesized joins
+/// (`pg_get_viewdef` writes every join as one). A parenthesized join that
+/// renames its columns (`(a JOIN b) AS x(c1, c2)`) doesn't count.
+fn plain_tables_only(twj: &TableWithJoins) -> bool {
+    std::iter::once(&twj.relation)
+        .chain(twj.joins.iter().map(|j| &j.relation))
+        .all(|tf| match tf {
+            TableFactor::Table { .. } => true,
+            TableFactor::NestedJoin { table_with_joins, alias } => {
+                alias.as_ref().is_none_or(|a| a.columns.is_empty())
+                    && plain_tables_only(table_with_joins)
+            }
+            _ => false,
+        })
+}
+
 /// Build `(sensitive column names, sensitive table names+aliases)`. Column names
 /// come from `tables` (every relation the statement touches); aliases of
 /// classified tables are resolved from `alias_sources` (top-level FROM/target
@@ -579,14 +593,24 @@ fn build_scope(
 }
 
 fn add_alias_if_classified(tf: &TableFactor, view: &RedactorView, table_refs: &mut HashSet<String>) {
-    if let TableFactor::Table { name, alias, .. } = tf {
-        if let Some(t) = last_ident(name) {
-            if view.by_name.contains_key(&t) {
-                if let Some(a) = alias {
-                    table_refs.insert(a.name.value.to_ascii_lowercase());
+    match tf {
+        TableFactor::Table { name, alias, .. } => {
+            if let Some(t) = last_ident(name) {
+                if view.by_name.contains_key(&t) {
+                    if let Some(a) = alias {
+                        table_refs.insert(a.name.value.to_ascii_lowercase());
+                    }
                 }
             }
         }
+        // Aliases inside a parenthesized join are in scope outside it.
+        TableFactor::NestedJoin { table_with_joins, .. } => {
+            add_alias_if_classified(&table_with_joins.relation, view, table_refs);
+            for join in &table_with_joins.joins {
+                add_alias_if_classified(&join.relation, view, table_refs);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -961,6 +985,17 @@ mod tests {
         );
         // A definition the parser rejects is opaque when it names a classified table.
         assert_eq!(definition_lineage("SELECT FROM patients WHERE (", &v), StoredLineage::Opaque);
+
+        // pg_get_viewdef parenthesizes every join; that's still traceable,
+        // including a whole-row reference through an alias inside it.
+        let joined = " SELECT a.id AS appointment_id,\n    count(*) AS n,\n    p.email,\n    to_jsonb(p.*) AS row\n   FROM ((appointments a\n     JOIN patients p ON ((p.id = a.patient_id)))\n     JOIN practices pr ON ((pr.id = p.practice_id)))\n  GROUP BY a.id, p.email, p.*;";
+        assert_eq!(
+            definition_lineage(joined, &v),
+            StoredLineage::Columns(vec![Clean, Clean, Copy("email".into()), Derived])
+        );
+        // …unless the parenthesized join renames its columns.
+        let renamed = " SELECT x.c2 FROM (patients p JOIN orders o ON true) x(c1, c2);";
+        assert_eq!(definition_lineage(renamed, &v), StoredLineage::Opaque);
     }
 
     #[test]

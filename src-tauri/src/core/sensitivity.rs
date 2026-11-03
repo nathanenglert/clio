@@ -552,10 +552,10 @@ async fn inherit_into_views(
                 Some(def) => lineage::definition_lineage(def, &view),
                 None => StoredLineage::Opaque,
             };
-            let flags = match lineage {
+            let (flags, opaque) = match lineage {
                 StoredLineage::Clean => continue,
-                StoredLineage::Columns(v) if v.len() == cols.len() => v,
-                _ => vec![StoredColumn::Derived; cols.len()],
+                StoredLineage::Columns(v) if v.len() == cols.len() => (v, false),
+                _ => (vec![StoredColumn::Derived; cols.len()], true),
             };
             for (col, flag) in cols.iter().zip(flags) {
                 let k = (schema.clone(), table.clone(), col.clone());
@@ -567,6 +567,11 @@ async fn inherit_into_views(
                     StoredColumn::Copy(src) => (
                         category.get(&src).copied().unwrap_or(Category::Pii),
                         format!("view copies classified column \"{src}\""),
+                    ),
+                    StoredColumn::Derived if opaque => (
+                        Category::Pii,
+                        "view reads classified data in a way that can't be traced per column"
+                            .to_string(),
                     ),
                     StoredColumn::Derived => {
                         (Category::Pii, "view derives it from classified data".to_string())
