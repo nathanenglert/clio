@@ -11,10 +11,10 @@
 >   test allows this.
 > - `pg_stat_activity.query` exposes the human's editor queries, including literal values.
 > - Classifier misses on unmatched names (`billing.unpaid_balances.patient`, `appointments.notes`,
->   `lab_results`).
+>   `lab_results`). Fixed in #43 (see Done).
 >
 > A DB-enforced agent role (column-level `REVOKE SELECT`) isn't an option, so the app closes these
-> itself: fail-closed classification (in progress) and the three tasks in Next.
+> itself: fail-closed classification (#43) and the three tasks in Next.
 
 ## Next
 
@@ -64,6 +64,16 @@
 - [ ]
 
 ## Done
+
+- [x] **Security (R2 — high) — fixed in #43:** The classifier only matched column names, once, at
+  connect, so a column it missed reached agents unredacted: unhelpful names
+  (`billing.unpaid_balances.patient`, `appointments.notes`, `lab_results`), a view renaming a
+  classified column, a copy made by `CREATE TABLE AS`, a column renamed by a migration.
+  - Text-like columns now redact until marked Safe. Sampled values flag SSNs, emails, phones and
+    card numbers. Views and copies inherit, classifications follow renames, and the agent path
+    rescans when its SQL names a relation that changed.
+  - Also fixed: a dropped-and-recreated table's bare classified columns went out unredacted,
+    because sqlx's cached prepared statement kept the old table OID.
 
 - [x] **Security (R2 — critical) — fixed in #41:** The agent's "read-only" paths aren't read-only, so it can copy
   PII into an unclassified table with no prompt. `validate_select_only` (`query.rs:58`) only checks
