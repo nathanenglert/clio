@@ -586,8 +586,13 @@ export function App() {
   // Idempotent on the backend: re-connecting an already-classified database
   // returns new_pending: 0, which we suppress. A null outcome means the scan
   // failed: the human can still query, but agents are refused the connection.
+  // Columns the shared file marks safe that still redact here come first:
+  // they're the ones waiting on the human.
   const onConnected = useCallback(
-    (name: string, outcome: { new_pending: number; total_classified: number } | null) => {
+    (
+      name: string,
+      outcome: { new_pending: number; shared_safe_waiting: number } | null,
+    ) => {
       if (!outcome) {
         showToast(
           <span>
@@ -598,16 +603,20 @@ export function App() {
         );
         return;
       }
-      if (outcome.new_pending === 0) return;
-      const n = outcome.new_pending;
+      const waiting = outcome.shared_safe_waiting;
+      if (outcome.new_pending === 0 && waiting === 0) return;
+      const n = waiting || outcome.new_pending;
       showToast(
         (
           <span>
             <span aria-hidden style={{ color: "var(--privacy)", marginRight: 6 }}>
               ◌
             </span>
-            <span className="mono">{n}</span> column{n === 1 ? "" : "s"} auto-classified
-            as sensitive on <span className="mono">{name}</span>
+            <span className="mono">{n}</span> column{n === 1 ? "" : "s"}{" "}
+            {waiting
+              ? "marked safe in the shared file still redacted"
+              : "auto-classified as sensitive"}{" "}
+            on <span className="mono">{name}</span>
           </span>
         ),
         "info",

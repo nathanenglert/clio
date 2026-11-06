@@ -570,7 +570,10 @@ mod tests {
     use crate::core::policy;
     use crate::core::Core;
     use crate::pool::PoolRegistry;
-    use crate::core::{classify_schema, update_classification};
+    use crate::core::{
+        classify_schema, link_sensitivity_file, sensitivity_file_status, unlink_sensitivity_file,
+        update_classification,
+    };
     use crate::types::{
         ActivityEvent, Category, Classification, ClassificationAction, ClassificationStatus,
         NewConnectionInput, QueryResult,
@@ -1509,6 +1512,160 @@ mod tests {
         let c = classification(&h, "persons", "born").await.unwrap();
         assert_eq!(c.status, ClassificationStatus::Confirmed);
         assert!(classification(&h, "people", "d1").await.is_none());
+        h.drop_schema().await;
+    }
+
+    // ── Shared sensitivity file ──────────────────────────────────────────
+    //
+    // A second connection to the same database stands in for another
+    // environment. See design/shared-sensitivity-file.md.
+
+    const OTHER_CONN: &str = "otherenv";
+
+    async fn add_other_connection(h: &Harness) {
+        connections::insert(
+            &h.core.meta,
+            &NewConnectionInput {
+                name: OTHER_CONN.into(),
+                host: "localhost".into(),
+                port: 0,
+                database: "workbench".into(),
+                username: "workbench".into(),
+                password: String::new(),
+                ssl_mode: "disable".into(),
+            },
+        )
+        .await
+        .unwrap();
+        h.core.pools.insert_for_test(OTHER_CONN, h.pool.clone(), true).await;
+    }
+
+    async fn status_of(h: &Harness, conn: &str, table: &str, column: &str) -> Option<ClassificationStatus> {
+        let conn_id = connections::get(&h.core.meta, conn).await.unwrap().id;
+        connections::list_classifications(&h.core.meta, &conn_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.schema == h.schema && c.table == table && c.column == column)
+            .map(|c| c.status)
+    }
+
+    fn temp_file_path() -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("clio-it-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clio-pii.json");
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn shared_file_carries_reviews_to_another_connection() {
+        let Some(h) = setup().await else { return };
+        let s = h.schema.clone();
+        raw(
+            &h,
+            &format!(
+                "CREATE TABLE {s}.leads (id int, notes text, status text, score bigint); \
+                 INSERT INTO {s}.leads VALUES (1, 'met at the clinic', 'open', 42);"
+            ),
+        )
+        .await;
+        let (dir, path) = temp_file_path();
+        let p = path.to_str().unwrap();
+        let mark = |conn: &'static str, column: &'static str, action: ClassificationAction| {
+            let core = h.core.clone();
+            let s = s.clone();
+            async move { update_classification(&core, conn, &s, "leads", column, action).await.unwrap() }
+        };
+
+        // Review in the first environment, then link: the review lands in the
+        // new file.
+        classify_schema(&h.core, TEST_CONN).await.unwrap();
+        mark(TEST_CONN, "status", ClassificationAction::MarkSafe).await;
+        assert_eq!(link_sensitivity_file(&h.core, TEST_CONN, p).await.unwrap(), 1);
+        // Linked: later reviews write through.
+        mark(TEST_CONN, "notes", ClassificationAction::Confirm).await;
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""status": { "status": "safe", "type": "text" }"#), "{text}");
+        assert!(text.contains(r#""notes": { "status": "redact", "category": "pii" }"#), "{text}");
+
+        // A fresh environment: the scan redacts every text column, then the
+        // file confirms `notes`. `status` waits for a human.
+        add_other_connection(&h).await;
+        classify_schema(&h.core, OTHER_CONN).await.unwrap();
+        assert_eq!(status_of(&h, OTHER_CONN, "leads", "notes").await, Some(ClassificationStatus::Pending));
+        assert_eq!(link_sensitivity_file(&h.core, OTHER_CONN, p).await.unwrap(), 0);
+        assert_eq!(status_of(&h, OTHER_CONN, "leads", "notes").await, Some(ClassificationStatus::Confirmed));
+        let outcome = classify_schema(&h.core, OTHER_CONN).await.unwrap();
+        assert_eq!(outcome.shared_safe_waiting, 1);
+        let waiting = sensitivity_file_status(&h.core, OTHER_CONN).await.unwrap().unwrap().waiting;
+        let waiting: Vec<(&str, &str)> =
+            waiting.iter().map(|w| (w.table.as_str(), w.column.as_str())).collect();
+        assert_eq!(waiting, vec![("leads", "status")]);
+
+        let read = format!("SELECT notes, status, score FROM {s}.leads");
+        let other_read = || {
+            let core = h.core.clone();
+            let read = read.clone();
+            async move { execute_statement(&core, OTHER_CONN, &read, None).await.unwrap() }
+        };
+        let r = other_read().await;
+        assert!(r.columns[0].redacted && r.columns[1].redacted, "safe in the file isn't safe here yet");
+        assert!(!r.columns[2].redacted);
+
+        // Accepting it makes it visible.
+        mark(OTHER_CONN, "status", ClassificationAction::MarkSafe).await;
+        let r = other_read().await;
+        assert!(!r.columns[1].redacted);
+        assert_eq!(r.rows[0][1].as_deref(), Some("open"));
+        assert!(sensitivity_file_status(&h.core, OTHER_CONN).await.unwrap().unwrap().waiting.is_empty());
+
+        // A redaction confirmed in the first environment reaches the other's
+        // agent before its next query, with no reconnect.
+        mark(TEST_CONN, "score", ClassificationAction::AddManual { category: Category::Pci }).await;
+        let r = other_read().await;
+        assert!(r.columns[2].redacted, "the file changed, so the agent path rescans");
+
+        // So does one written to the file by hand (a teammate's commit).
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(r#""status": { "status": "safe", "type": "text" }"#, r#""status": { "status": "redact", "category": "pii" }"#);
+        std::fs::write(&path, edited).unwrap();
+        let r = other_read().await;
+        assert!(r.columns[1].redacted, "a redaction in the file wins over a local safe");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        h.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn unreadable_shared_file_refuses_agents_and_changes_nothing() {
+        let Some(h) = setup().await else { return };
+        let s = h.schema.clone();
+        raw(&h, &format!("CREATE TABLE {s}.leads (id int, notes text); INSERT INTO {s}.leads VALUES (1, 'x');")).await;
+        let (dir, path) = temp_file_path();
+        link_sensitivity_file(&h.core, TEST_CONN, path.to_str().unwrap()).await.unwrap();
+        let read = format!("SELECT notes FROM {s}.leads");
+        agent_read(&h, &read).await;
+
+        // A merge conflict, say.
+        std::fs::write(&path, "<<<<<<< HEAD\n{}").unwrap();
+        let e = execute_statement(&h.core, TEST_CONN, &read, None).await.unwrap_err();
+        assert!(format!("{e:#}").contains("shared sensitivity file"), "{e:#}");
+        assert!(classify_schema(&h.core, TEST_CONN).await.is_err());
+        let st = sensitivity_file_status(&h.core, TEST_CONN).await.unwrap().unwrap();
+        assert!(st.error.is_some());
+
+        // Write-back goes first, so a failed write leaves the review as it was.
+        let r = update_classification(&h.core, TEST_CONN, &s, "leads", "notes", ClassificationAction::MarkSafe).await;
+        assert!(r.is_err());
+        assert_eq!(status_of(&h, TEST_CONN, "leads", "notes").await, Some(ClassificationStatus::Pending));
+
+        // Unlinked, agents get the connection back; the file is untouched.
+        unlink_sensitivity_file(&h.core, TEST_CONN).await.unwrap();
+        assert!(agent_read(&h, &read).await.columns[0].redacted);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "<<<<<<< HEAD\n{}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
         h.drop_schema().await;
     }
 }

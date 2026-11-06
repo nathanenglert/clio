@@ -174,6 +174,34 @@ async fn update_classification(
         .map_err(format_err)
 }
 
+#[tauri::command]
+async fn sensitivity_file_status(
+    state: State<'_, Core>,
+    connection: String,
+) -> Result<Option<SharedFileStatus>, String> {
+    core::sensitivity_file_status(&state, &connection)
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
+async fn link_sensitivity_file(
+    state: State<'_, Core>,
+    connection: String,
+    path: String,
+) -> Result<u32, String> {
+    core::link_sensitivity_file(&state, &connection, &path)
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
+async fn unlink_sensitivity_file(state: State<'_, Core>, connection: String) -> Result<(), String> {
+    core::unlink_sensitivity_file(&state, &connection)
+        .await
+        .map_err(format_err)
+}
+
 /// Frontend → backend channel for resolving a pending permission request.
 /// `id` is the request id from the `permission_required` activity event.
 /// `verdict` is one of:
@@ -669,6 +697,9 @@ pub fn run() {
             classify_schema,
             list_classifications,
             update_classification,
+            sensitivity_file_status,
+            link_sensitivity_file,
+            unlink_sensitivity_file,
             set_reveal_sensitive,
             resolve_permission,
             resolve_migration,

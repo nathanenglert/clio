@@ -222,6 +222,9 @@ A focused modal, 800px wide, scrollable list of classified columns grouped by ta
 
 - Privacy glyph `◌` in `--privacy` color (dashed border when pending, solid when confirmed).
 - Column name (mono 12px) · type (mono 11px `--text-muted`) · category pill.
+- The column name sits in a fixed 180px column so pills line up down the list; longer
+  names truncate with an ellipsis and show in full in the tooltip, as do reasons. Table
+  headings truncate the schema before the table. Buttons never wrap.
 - Category pill: 10px mono, `--privacy-soft` background, `--privacy` text. Pending rows
   show `?` after the pill; confirmed rows show `✓`.
 - Reason line in 10.5px `--text-muted` to the right of the pill.
@@ -240,6 +243,11 @@ A focused modal, 800px wide, scrollable list of classified columns grouped by ta
 `[+ Add manually]` opens a small inline form: pick `table` → pick `column` → pick
 `category`. Useful for columns the heuristic missed (e.g., a freeform `notes` field
 known to contain PHI).
+
+### Shared file
+
+A connection can link a JSON file of reviewed decisions so other connections and
+teammates reuse them. See [shared-sensitivity-file.md](shared-sensitivity-file.md).
 
 ### Bulk actions
 
@@ -558,8 +566,6 @@ with `reveal: false`. Compile-time literal, not a parameter the tool exposes.
   "agent leaking", not "user revealing on their own machine" — so this is lower
   priority. v0.2 if asked.
 - **Per-column reveal** (reveal one column while keeping the rest masked).
-- **Project-shared classification policy** (sync classifications across teammates).
-  The current per-connection store is local-only.
 - **Redaction of values surfaced in the schema browser sample previews** — once sample
   previews ship, they need to respect this. Note for the schema-browser implementer.
 

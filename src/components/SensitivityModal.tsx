@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   api,
   type Category,
   type Classification,
   type ClassificationAction,
   type ClassificationStatus,
+  type SharedFileStatus,
+  type WaitingSafe,
 } from "../lib/api";
 import { Modal } from "./Modal";
 import { showToast } from "./Toast";
@@ -15,6 +18,35 @@ type Props = {
 };
 
 const ALL_CATEGORIES: Category[] = ["phi", "pci", "pii"];
+const FILE_FILTERS = [{ name: "JSON", extensions: ["json"] }];
+
+type ColumnRef = Pick<Classification, "schema" | "table" | "column">;
+
+function basename(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+function dirname(path: string): string {
+  return path.slice(0, path.length - basename(path).length);
+}
+
+/**
+ * A dotted name kept on one line. When space runs out the leading parts
+ * (schema, then table) truncate first, so the most specific part stays
+ * readable. The tooltip has the full name.
+ */
+function QualifiedName({ parts, className = "" }: { parts: string[]; className?: string }) {
+  return (
+    <span className={`sens-qname mono ${className}`} title={parts.join(".")}>
+      {parts.map((p, i) => (
+        <Fragment key={i}>
+          {i > 0 && <span className="sep">.</span>}
+          <span style={{ flexShrink: 100 ** (parts.length - 1 - i) }}>{p}</span>
+        </Fragment>
+      ))}
+    </span>
+  );
+}
 
 type Filter = "all" | ClassificationStatus;
 const FILTERS: { value: Filter; label: string }[] = [
@@ -35,18 +67,28 @@ const FILTERS: { value: Filter; label: string }[] = [
  * whenever an action mutates state); it does not mirror a parent prop.
  * Mutations call `update_classification`, which invalidates the
  * per-connection redactor cache so the next query reflects the change.
+ *
+ * A connection can link a shared file of reviewed decisions; columns the file
+ * marks safe stay redacted here until accepted. See
+ * design/shared-sensitivity-file.md.
  */
 export function SensitivityModal({ connection, onClose }: Props) {
   const [rows, setRows] = useState<Classification[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
+  // undefined while loading; null when not linked.
+  const [shared, setShared] = useState<SharedFileStatus | null | undefined>(undefined);
 
   const reload = useCallback(async () => {
     setError(null);
     try {
-      const r = await api.list_classifications(connection);
+      const [r, f] = await Promise.all([
+        api.list_classifications(connection),
+        api.sensitivity_file_status(connection),
+      ]);
       setRows(r);
+      setShared(f);
     } catch (e) {
       setError(String(e));
     }
@@ -76,7 +118,7 @@ export function SensitivityModal({ connection, onClose }: Props) {
 
   // Applies `action` to each row in turn, then reloads once.
   const actOn = useCallback(
-    async (targets: Classification[], action: ClassificationAction) => {
+    async (targets: ColumnRef[], action: ClassificationAction) => {
       setBusy(true);
       try {
         for (const row of targets) {
@@ -102,12 +144,50 @@ export function SensitivityModal({ connection, onClose }: Props) {
     [actOn],
   );
 
+  const link = useCallback(
+    async (create: boolean) => {
+      const path = create
+        ? await saveDialog({ defaultPath: "clio-pii.json", filters: FILE_FILTERS })
+        : await openDialog({ multiple: false, directory: false, filters: FILE_FILTERS });
+      if (typeof path !== "string") return; // cancelled
+      setBusy(true);
+      try {
+        const added = await api.link_sensitivity_file(connection, path);
+        showToast(
+          added > 0
+            ? `Linked ${basename(path)}. Added ${added} decision${added === 1 ? "" : "s"} from ${connection}.`
+            : `Linked ${basename(path)}.`,
+        );
+      } catch (e) {
+        showToast(String(e), "err");
+      } finally {
+        await reload();
+        setBusy(false);
+      }
+    },
+    [connection, reload],
+  );
+
+  const unlink = useCallback(async () => {
+    setBusy(true);
+    try {
+      await api.unlink_sensitivity_file(connection);
+    } catch (e) {
+      showToast(String(e), "err");
+    } finally {
+      await reload();
+      setBusy(false);
+    }
+  }, [connection, reload]);
+
   return (
     <Modal onClose={onClose} className="sensitivity-modal">
       <div className="review-head">
         <span className="review-title">Sensitivity</span>
         <span className="tray-dot">·</span>
-        <span className="mono review-meta">{connection}</span>
+        <span className="mono review-meta" title={connection}>
+          {connection}
+        </span>
         <div className="spacer" />
         <button className="editor-btn ghost" onClick={onClose} aria-label="Close">
           ✗
@@ -150,6 +230,16 @@ export function SensitivityModal({ connection, onClose }: Props) {
         </span>
       </div>
 
+      {shared !== undefined && (
+        <SharedFileBar
+          shared={shared}
+          busy={busy}
+          onLink={() => link(false)}
+          onCreate={() => link(true)}
+          onUnlink={unlink}
+        />
+      )}
+
       {error && (
         <div className="review-warn">
           <span className="warn-icon" aria-hidden>⚠</span>
@@ -158,6 +248,13 @@ export function SensitivityModal({ connection, onClose }: Props) {
       )}
 
       <div className="sens-body">
+        {shared && shared.waiting.length > 0 && (
+          <WaitingGroup
+            waiting={shared.waiting}
+            busy={busy}
+            onAccept={(targets) => actOn(targets, { kind: "mark_safe" })}
+          />
+        )}
         {rows === null && !error && (
           <div className="sens-empty">Loading classifications…</div>
         )}
@@ -173,7 +270,6 @@ export function SensitivityModal({ connection, onClose }: Props) {
         {groups.map(([key, items]) => (
           <SensitivityTableGroup
             key={key}
-            tableKey={key}
             items={items}
             busy={busy}
             onAction={act}
@@ -197,14 +293,131 @@ export function SensitivityModal({ connection, onClose }: Props) {
   );
 }
 
+function SharedFileBar({
+  shared,
+  busy,
+  onLink,
+  onCreate,
+  onUnlink,
+}: {
+  shared: SharedFileStatus | null;
+  busy: boolean;
+  onLink: () => void;
+  onCreate: () => void;
+  onUnlink: () => void;
+}) {
+  if (!shared) {
+    return (
+      <div className="sens-share">
+        <span className="sens-share-label">Not shared</span>
+        <span className="tray-dot">·</span>
+        <span className="sens-summary-hint">
+          Share these reviews with other connections and teammates through a file in your repo.
+        </span>
+        <div className="spacer" />
+        <button className="editor-btn ghost" disabled={busy} onClick={onLink}>
+          Link file…
+        </button>
+        <button className="editor-btn ghost" disabled={busy} onClick={onCreate}>
+          Create file…
+        </button>
+      </div>
+    );
+  }
+  return (
+    <>
+      <div className="sens-share">
+        <span className="sens-share-label">Shared file</span>
+        <span className="mono sens-share-name" title={shared.path}>
+          {basename(shared.path)}
+        </span>
+        {/* Truncates from the left, so the folder nearest the file stays. */}
+        <span className="mono sens-share-path" title={shared.path}>
+          {`\u200e${dirname(shared.path)}\u200e`}
+        </span>
+        <div className="spacer" />
+        <button className="editor-btn ghost" disabled={busy} onClick={onUnlink}>
+          Unlink
+        </button>
+      </div>
+      {shared.error && (
+        <div className="review-warn sens-share-error" title={shared.error}>
+          <span className="warn-icon" aria-hidden>⚠</span>
+          <span>
+            Can't read this file:{" "}
+            <span className="mono">
+              {shared.error.replace(`shared sensitivity file ${shared.path}: `, "")}
+            </span>
+            . Agents can't use this connection until it's fixed or unlinked.
+          </span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function WaitingGroup({
+  waiting,
+  busy,
+  onAccept,
+}: {
+  waiting: WaitingSafe[];
+  busy: boolean;
+  onAccept: (targets: WaitingSafe[]) => void;
+}) {
+  return (
+    <div className="sens-group waiting">
+      <div className="sens-group-head">
+        <span>Marked safe in the shared file</span>
+        <span className="mono">{waiting.length}</span>
+        <span className="sens-summary-hint">Still redacted here until you accept.</span>
+        <div className="spacer" />
+        <button
+          className="editor-btn ghost"
+          disabled={busy}
+          onClick={() => onAccept(waiting)}
+          title="Mark every column in this list safe on this connection"
+        >
+          Accept all
+        </button>
+      </div>
+      <div className="sens-group-list">
+        {waiting.map((w) => (
+          <div key={`${w.schema}.${w.table}.${w.column}`} className="sens-row pending">
+            <span className="sens-glyph" aria-hidden>
+              ◌
+            </span>
+            <span className="sens-col mono" title={w.column}>
+              {w.column}
+            </span>
+            <QualifiedName parts={[w.schema, w.table]} className="sens-wait-table" />
+            <span className="sens-reason" title={w.reason}>
+              {w.reason}
+            </span>
+            <div className="spacer" />
+            <div className="sens-actions">
+              <button
+                className="editor-btn"
+                disabled={busy}
+                onClick={() => onAccept([w])}
+                title="Mark safe on this connection: stop redacting it"
+              >
+                Accept
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SensitivityTableGroup({
-  tableKey,
   items,
   busy,
   onAction,
   onMarkTableSafe,
 }: {
-  tableKey: string;
   items: Classification[];
   busy: boolean;
   onAction: (row: Classification, action: ClassificationAction) => void;
@@ -214,7 +427,7 @@ function SensitivityTableGroup({
   return (
     <div className="sens-group">
       <div className="sens-group-head">
-        <span className="mono">{tableKey}</span>
+        <QualifiedName parts={[items[0].schema, items[0].table]} />
         <div className="spacer" />
         {redacted > 0 && (
           <button
@@ -255,7 +468,9 @@ function SensitivityRow({
     return (
       <div className="sens-row safe">
         <span className="sens-glyph" aria-hidden />
-        <span className="sens-col mono">{row.column}</span>
+        <span className="sens-col mono" title={row.column}>
+          {row.column}
+        </span>
         <span className="sens-cat-pill safe">SAFE</span>
         <span className="sens-reason">marked safe · not redacted</span>
         <div className="spacer" />
@@ -281,14 +496,18 @@ function SensitivityRow({
       >
         ◌
       </span>
-      <span className="sens-col mono">{row.column}</span>
+      <span className="sens-col mono" title={row.column}>
+        {row.column}
+      </span>
       <span className="sens-cat-pill" data-cat={row.category}>
         {row.category.toUpperCase()}
       </span>
       <span className={`sens-status ${pending ? "pending" : "confirmed"}`}>
         {pending ? "?" : "✓"}
       </span>
-      <span className="sens-reason">{row.reason}</span>
+      <span className="sens-reason" title={row.reason}>
+        {row.reason}
+      </span>
       <div className="spacer" />
       <div className="sens-actions">
         {pending && (

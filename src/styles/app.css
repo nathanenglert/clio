@@ -2410,8 +2410,9 @@ body.dragging-y * { cursor: inherit !important; }
 }
 .sens-summary {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--line-faint);
   font-size: var(--fs-xs);
@@ -2419,11 +2420,99 @@ body.dragging-y * { cursor: inherit !important; }
   background: var(--bg-canvas);
 }
 .sens-summary .spacer { flex: 1; }
+/* Keep each count with its label; the hint gets its own line. */
+.sens-summary > span:not(.sens-summary-hint) { white-space: nowrap; }
+.sens-summary > .sens-summary-hint {
+  flex-basis: 100%;
+  max-width: none;
+  text-align: left;
+}
+/* Identifiers truncate (full value in the tooltip); prose wraps. Buttons
+   never wrap. */
+.sensitivity-modal .editor-btn { white-space: nowrap; flex-shrink: 0; }
+.sensitivity-modal .review-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sens-qname {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.sens-qname > span {
+  min-width: 3ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sens-qname > span:last-child { min-width: 0; }
+.sens-qname > .sep { flex-shrink: 0; min-width: 0; }
+.sens-group-head .sens-qname { flex: 0 1 auto; }
 .sens-summary-hint {
   font-size: 10.5px;
   color: var(--text-muted);
   text-align: right;
   max-width: 380px;
+}
+.sens-share {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line-faint);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  background: var(--bg-canvas);
+}
+.sens-share .spacer { flex: 1; }
+.sens-share .editor-btn {
+  padding: 2px 8px;
+  font-size: 10.5px;
+}
+.sens-share .sens-summary-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+  text-align: left;
+  text-wrap: balance;
+}
+.sens-share-label { flex: 0 0 auto; white-space: nowrap; }
+.sens-share-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The folder gives way before the file name does. */
+.sens-share-path {
+  flex: 0 1000 auto;
+  min-width: 0;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+.sens-share-error > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.sens-group.waiting .sens-group-head > span { flex: 0 0 auto; white-space: nowrap; }
+.sens-group.waiting .sens-group-head > .sens-summary-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.sens-wait-table {
+  flex: 0 1 auto;
+  max-width: 30%;
+  color: var(--text-muted);
+  font-size: 10.5px;
 }
 .sens-body {
   flex: 1;
@@ -2478,9 +2567,12 @@ body.dragging-y * { cursor: inherit !important; }
   text-align: center;
 }
 .sens-col {
-  flex: 0 0 auto;
+  /* Fixed, so the pills line up down the list. */
+  flex: 0 0 180px;
   color: var(--text-primary);
-  min-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sens-cat-pill {
   flex: 0 0 auto;

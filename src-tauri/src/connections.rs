@@ -230,6 +230,7 @@ pub async fn open_metadata() -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
     sqlx::query(SCANNED_DDL).execute(&pool).await?;
+    sqlx::query(SENSITIVITY_FILES_DDL).execute(&pool).await?;
 
     Ok(pool)
 }
@@ -252,10 +253,20 @@ const SCANNED_DDL: &str = r#"
         FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
     )"#;
 
+/// The shared sensitivity file each connection links to, if any. See
+/// design/shared-sensitivity-file.md.
+const SENSITIVITY_FILES_DDL: &str = r#"
+    CREATE TABLE IF NOT EXISTS sensitivity_files (
+        connection_id TEXT PRIMARY KEY,
+        path          TEXT NOT NULL,
+        FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
+    )"#;
+
 /// Test-only metadata DB: an in-memory SQLite with just the tables the
 /// gated-runner path reads — `connections` (for [`get`]),
-/// `sensitivity_classifications` (for the redactor view) and
-/// `sensitivity_scanned` (for the sensitivity scan). `max_connections(1)`
+/// `sensitivity_classifications` (for the redactor view),
+/// `sensitivity_scanned` (for the sensitivity scan) and `sensitivity_files`
+/// (for the shared file). `max_connections(1)`
 /// keeps the single in-memory database alive for the pool's lifetime (a
 /// shared `:memory:` would otherwise vanish between connections). Kept in sync
 /// with the DDL in [`open_metadata`] by the integration tests, which fail
@@ -298,6 +309,7 @@ pub(crate) async fn open_metadata_in_memory() -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
     sqlx::query(SCANNED_DDL).execute(&pool).await?;
+    sqlx::query(SENSITIVITY_FILES_DDL).execute(&pool).await?;
     Ok(pool)
 }
 
@@ -590,6 +602,65 @@ pub async fn rename_classification(
     .execute(pool)
     .await
     .with_context(|| format!("rename classification {}.{}.{}", from.0, from.1, from.2))?;
+    Ok(())
+}
+
+/// Insert or overwrite a classification as Confirmed. Used when the shared
+/// file says to redact a column, whatever its local state was.
+pub async fn upsert_confirmed(
+    pool: &SqlitePool,
+    connection_id: &str,
+    schema: &str,
+    table: &str,
+    column: &str,
+    category: Category,
+    reason: &str,
+) -> Result<()> {
+    let created_at = chrono::Utc::now().timestamp();
+    sqlx::query(
+        r#"INSERT INTO sensitivity_classifications
+              (connection_id, schema_name, table_name, column_name, category, status, reason, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, 'confirmed', ?6, ?7)
+           ON CONFLICT (connection_id, schema_name, table_name, column_name)
+           DO UPDATE SET category = excluded.category, status = 'confirmed', reason = excluded.reason"#,
+    )
+    .bind(connection_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .bind(category.as_db())
+    .bind(reason)
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .with_context(|| format!("confirm classification {schema}.{table}.{column}"))?;
+    Ok(())
+}
+
+pub async fn get_sensitivity_file(pool: &SqlitePool, connection_id: &str) -> Result<Option<String>> {
+    sqlx::query_scalar("SELECT path FROM sensitivity_files WHERE connection_id = ?1")
+        .bind(connection_id)
+        .fetch_optional(pool)
+        .await
+        .with_context(|| "read shared sensitivity file link")
+}
+
+/// Link `connection_id` to the file at `path`, or unlink it with `None`.
+pub async fn set_sensitivity_file(
+    pool: &SqlitePool,
+    connection_id: &str,
+    path: Option<&str>,
+) -> Result<()> {
+    let q = match path {
+        Some(p) => sqlx::query(
+            "INSERT INTO sensitivity_files (connection_id, path) VALUES (?1, ?2)
+             ON CONFLICT (connection_id) DO UPDATE SET path = excluded.path",
+        )
+        .bind(connection_id)
+        .bind(p),
+        None => sqlx::query("DELETE FROM sensitivity_files WHERE connection_id = ?1").bind(connection_id),
+    };
+    q.execute(pool).await.with_context(|| "update shared sensitivity file link")?;
     Ok(())
 }
 
