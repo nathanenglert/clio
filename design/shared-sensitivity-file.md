@@ -99,7 +99,10 @@ Below the summary line:
 - Linked: the file's path and `[Unlink]`, or the read error.
 - When columns are waiting: a group headed `Marked safe in the shared file` with
   `[Accept all]`, one row per column with its local reason and `[Accept]`. Accepting is
-  Mark safe.
+  Mark safe. Each row shows the column in the same aligned column as the rest of the
+  panel, then `schema.table` muted (schema truncates first).
+- A file that can't be read shows just the cause (the path is already in the bar), with
+  the full message in the tooltip.
 
 The post-connect toast says how many columns are waiting, with `Review`.
 

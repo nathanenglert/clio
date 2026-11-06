@@ -222,6 +222,9 @@ A focused modal, 800px wide, scrollable list of classified columns grouped by ta
 
 - Privacy glyph `◌` in `--privacy` color (dashed border when pending, solid when confirmed).
 - Column name (mono 12px) · type (mono 11px `--text-muted`) · category pill.
+- The column name sits in a fixed 180px column so pills line up down the list; longer
+  names truncate with an ellipsis and show in full in the tooltip, as do reasons. Table
+  headings truncate the schema before the table. Buttons never wrap.
 - Category pill: 10px mono, `--privacy-soft` background, `--privacy` text. Pending rows
   show `?` after the pill; confirmed rows show `✓`.
 - Reason line in 10.5px `--text-muted` to the right of the pill.

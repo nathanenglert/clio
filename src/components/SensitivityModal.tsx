@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   api,
@@ -28,6 +28,24 @@ function basename(path: string): string {
 
 function dirname(path: string): string {
   return path.slice(0, path.length - basename(path).length);
+}
+
+/**
+ * A dotted name kept on one line. When space runs out the leading parts
+ * (schema, then table) truncate first, so the most specific part stays
+ * readable. The tooltip has the full name.
+ */
+function QualifiedName({ parts, className = "" }: { parts: string[]; className?: string }) {
+  return (
+    <span className={`sens-qname mono ${className}`} title={parts.join(".")}>
+      {parts.map((p, i) => (
+        <Fragment key={i}>
+          {i > 0 && <span className="sep">.</span>}
+          <span style={{ flexShrink: 100 ** (parts.length - 1 - i) }}>{p}</span>
+        </Fragment>
+      ))}
+    </span>
+  );
 }
 
 type Filter = "all" | ClassificationStatus;
@@ -167,7 +185,9 @@ export function SensitivityModal({ connection, onClose }: Props) {
       <div className="review-head">
         <span className="review-title">Sensitivity</span>
         <span className="tray-dot">·</span>
-        <span className="mono review-meta">{connection}</span>
+        <span className="mono review-meta" title={connection}>
+          {connection}
+        </span>
         <div className="spacer" />
         <button className="editor-btn ghost" onClick={onClose} aria-label="Close">
           ✗
@@ -250,7 +270,6 @@ export function SensitivityModal({ connection, onClose }: Props) {
         {groups.map(([key, items]) => (
           <SensitivityTableGroup
             key={key}
-            tableKey={key}
             items={items}
             busy={busy}
             onAction={act}
@@ -322,10 +341,14 @@ function SharedFileBar({
         </button>
       </div>
       {shared.error && (
-        <div className="review-warn">
+        <div className="review-warn sens-share-error" title={shared.error}>
           <span className="warn-icon" aria-hidden>⚠</span>
-          <span className="mono">
-            {shared.error}. Agents can't use this connection until the file is fixed or unlinked.
+          <span>
+            Can't read this file:{" "}
+            <span className="mono">
+              {shared.error.replace(`shared sensitivity file ${shared.path}: `, "")}
+            </span>
+            . Agents can't use this connection until it's fixed or unlinked.
           </span>
         </div>
       )}
@@ -364,10 +387,13 @@ function WaitingGroup({
             <span className="sens-glyph" aria-hidden>
               ◌
             </span>
-            <span className="sens-col mono">
-              {w.schema}.{w.table}.{w.column}
+            <span className="sens-col mono" title={w.column}>
+              {w.column}
             </span>
-            <span className="sens-reason">{w.reason}</span>
+            <QualifiedName parts={[w.schema, w.table]} className="sens-wait-table" />
+            <span className="sens-reason" title={w.reason}>
+              {w.reason}
+            </span>
             <div className="spacer" />
             <div className="sens-actions">
               <button
@@ -387,13 +413,11 @@ function WaitingGroup({
 }
 
 function SensitivityTableGroup({
-  tableKey,
   items,
   busy,
   onAction,
   onMarkTableSafe,
 }: {
-  tableKey: string;
   items: Classification[];
   busy: boolean;
   onAction: (row: Classification, action: ClassificationAction) => void;
@@ -403,7 +427,7 @@ function SensitivityTableGroup({
   return (
     <div className="sens-group">
       <div className="sens-group-head">
-        <span className="mono">{tableKey}</span>
+        <QualifiedName parts={[items[0].schema, items[0].table]} />
         <div className="spacer" />
         {redacted > 0 && (
           <button
@@ -444,7 +468,9 @@ function SensitivityRow({
     return (
       <div className="sens-row safe">
         <span className="sens-glyph" aria-hidden />
-        <span className="sens-col mono">{row.column}</span>
+        <span className="sens-col mono" title={row.column}>
+          {row.column}
+        </span>
         <span className="sens-cat-pill safe">SAFE</span>
         <span className="sens-reason">marked safe · not redacted</span>
         <div className="spacer" />
@@ -470,14 +496,18 @@ function SensitivityRow({
       >
         ◌
       </span>
-      <span className="sens-col mono">{row.column}</span>
+      <span className="sens-col mono" title={row.column}>
+        {row.column}
+      </span>
       <span className="sens-cat-pill" data-cat={row.category}>
         {row.category.toUpperCase()}
       </span>
       <span className={`sens-status ${pending ? "pending" : "confirmed"}`}>
         {pending ? "?" : "✓"}
       </span>
-      <span className="sens-reason">{row.reason}</span>
+      <span className="sens-reason" title={row.reason}>
+        {row.reason}
+      </span>
       <div className="spacer" />
       <div className="sens-actions">
         {pending && (
