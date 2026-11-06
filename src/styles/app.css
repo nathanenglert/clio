@@ -2425,6 +2425,34 @@ body.dragging-y * { cursor: inherit !important; }
   text-align: right;
   max-width: 380px;
 }
+.sens-share {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line-faint);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  background: var(--bg-canvas);
+}
+.sens-share .spacer { flex: 1; }
+.sens-share .editor-btn {
+  padding: 2px 8px;
+  font-size: 10.5px;
+}
+.sens-share .sens-summary-hint { text-align: left; }
+.sens-share-label { flex: 0 0 auto; white-space: nowrap; }
+.sens-share-name { flex: 0 0 auto; color: var(--text-primary); }
+.sens-share-path {
+  min-width: 0;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+.sens-group.waiting .sens-group-head .sens-summary-hint { text-align: left; }
 .sens-body {
   flex: 1;
   overflow-y: auto;

@@ -279,6 +279,24 @@ export type ClassifyOutcome = {
   new_pending: number;
   already_classified: number;
   total_classified: number;
+  /** Columns the linked shared file marks safe that still redact here. */
+  shared_safe_waiting: number;
+};
+
+/** A connection's linked shared file. See design/shared-sensitivity-file.md. */
+export type SharedFileStatus = {
+  path: string;
+  /** Why the file couldn't be read; agents are refused until it's fixed. */
+  error: string | null;
+  waiting: WaitingSafe[];
+};
+
+export type WaitingSafe = {
+  schema: string;
+  table: string;
+  column: string;
+  /** The local classification's reason. */
+  reason: string;
 };
 
 export type ClassificationAction =
@@ -466,6 +484,12 @@ export const api = {
       column,
       action,
     }),
+  sensitivity_file_status: (connection: string) =>
+    invoke<SharedFileStatus | null>("sensitivity_file_status", { connection }),
+  link_sensitivity_file: (connection: string, path: string) =>
+    invoke<number>("link_sensitivity_file", { connection, path }),
+  unlink_sensitivity_file: (connection: string) =>
+    invoke<void>("unlink_sensitivity_file", { connection }),
   resolve_permission: (id: string, verdict: PermissionVerdict) =>
     invoke<void>("resolve_permission", { id, verdict }),
   resolve_migration: (id: string, verdict: MigrationVerdict) =>
