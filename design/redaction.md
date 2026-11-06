@@ -241,6 +241,11 @@ A focused modal, 800px wide, scrollable list of classified columns grouped by ta
 `category`. Useful for columns the heuristic missed (e.g., a freeform `notes` field
 known to contain PHI).
 
+### Shared file
+
+A connection can link a JSON file of reviewed decisions so other connections and
+teammates reuse them. See [shared-sensitivity-file.md](shared-sensitivity-file.md).
+
 ### Bulk actions
 
 Each table group's header has `[Mark table safe]`, which marks every redacted column in
@@ -558,8 +563,6 @@ with `reveal: false`. Compile-time literal, not a parameter the tool exposes.
   "agent leaking", not "user revealing on their own machine" — so this is lower
   priority. v0.2 if asked.
 - **Per-column reveal** (reveal one column while keeping the rest masked).
-- **Project-shared classification policy** (sync classifications across teammates).
-  The current per-connection store is local-only.
 - **Redaction of values surfaced in the schema browser sample previews** — once sample
   previews ship, they need to respect this. Note for the schema-browser implementer.
 

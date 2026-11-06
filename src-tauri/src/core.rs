@@ -17,6 +17,7 @@ pub(crate) mod redactor;
 mod saved_queries;
 mod schema;
 mod sensitivity;
+mod sensitivity_file;
 mod snippets;
 
 pub use execute::{execute_migration, execute_statement};
@@ -29,7 +30,10 @@ pub use mutations::apply_mutations;
 pub use query::{run_query, run_sql};
 pub use saved_queries::{delete_saved_query, list_saved_queries, upsert_saved_query};
 pub use schema::{describe_table, list_schemas, list_tables, search_columns};
-pub use sensitivity::{classify_schema, list_classifications, update_classification};
+pub use sensitivity::{
+    classify_schema, link_sensitivity_file, list_classifications, sensitivity_file_status,
+    unlink_sensitivity_file, update_classification,
+};
 pub use snippets::{delete_snippet, list_snippets, upsert_snippet};
 
 use permission::{PendingConnects, PendingMigrations, PendingPermissions};
