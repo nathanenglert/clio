@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/nathanenglert/clio/compare/v0.3.0...v0.4.0) (2026-11-06)
+
+
+### Features
+
+* **redaction:** shared sensitivity file ([#48](https://github.com/nathanenglert/clio/issues/48)) ([82eee61](https://github.com/nathanenglert/clio/commit/82eee6105b01256384992725339414d0b9a41d66))
+
 ## [0.3.0](https://github.com/nathanenglert/clio/compare/v0.2.1...v0.3.0) (2026-11-03)
 
 
