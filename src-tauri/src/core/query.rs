@@ -100,7 +100,7 @@ fn reject_parsed_non_read(sql: &str) -> Result<()> {
     Ok(())
 }
 
-fn strip_comments_lower(sql: &str) -> String {
+pub(super) fn strip_comments_lower(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
     let bytes = sql.as_bytes();
     let mut i = 0;
@@ -158,7 +158,7 @@ pub async fn run_query(
     let r = async {
         validate_select_only(sql)?;
         reject_parsed_non_read(sql)?;
-        run_decoded(core, conn, sql, reveal, /* read_only */ true).await
+        run_decoded(core, conn, sql, reveal, /* read_only */ true, None).await
     }
     .await;
 
@@ -183,7 +183,7 @@ pub async fn run_sql(
     reveal: bool,
 ) -> Result<QueryResult> {
     let started = Instant::now();
-    let r = run_decoded(core, conn, sql, reveal, /* read_only */ false).await;
+    let r = run_decoded(core, conn, sql, reveal, /* read_only */ false, None).await;
 
     let mut detail = sql.replace('\n', " ");
     if detail.len() > 80 {
@@ -208,12 +208,18 @@ pub async fn run_sql(
 /// `QueryResult`. Works uniformly for SELECT (rows back), and for
 /// INSERT/UPDATE/DELETE without RETURNING (empty rows + empty columns —
 /// Postgres returns no result columns when there's nothing to return).
+///
+/// `on` runs the statement on that connection instead of the pool — an
+/// editor script's connection, which may hold an open transaction. The
+/// caller then owns the classify-the-copy pass (`inherit_from_write`), since
+/// only it knows when the statement's transaction has ended.
 pub(super) async fn run_decoded(
     core: &Core,
     conn: &str,
     sql: &str,
     reveal: bool,
     read_only: bool,
+    on: Option<&mut sqlx::PgConnection>,
 ) -> Result<QueryResult> {
     let started = Instant::now();
     let pool = core.pool(conn).await?;
@@ -244,16 +250,17 @@ pub(super) async fn run_decoded(
         None => false,
     };
 
-    let fetched = if read_only {
-        fetch_read_only(&pool, sql).await
-    } else {
-        fetch_counted(&pool, sql).await
+    let pinned = on.is_some();
+    let fetched = match on {
+        Some(db) => fetch_counted(db, sql).await,
+        None if read_only => fetch_read_only(&pool, sql).await,
+        None => fetch_counted(&pool, sql).await,
     };
     let (rows, rows_affected) = match fetched {
         Ok(r) => r,
         Err(e) => return Err(sanitize_db_error(core, classified, e)),
     };
-    if !read_only {
+    if !read_only && !pinned {
         // A write that copied classified values classifies its target.
         sensitivity::inherit_from_write(core, conn, &pool, sql)
             .await

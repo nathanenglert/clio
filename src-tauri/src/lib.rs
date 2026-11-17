@@ -103,6 +103,25 @@ async fn run_query(
         .map_err(format_err)
 }
 
+/// Run a tab's statements in order — see `core::script`.
+#[tauri::command]
+async fn run_script(
+    state: State<'_, Core>,
+    connection: String,
+    tab: String,
+    statements: Vec<String>,
+    reveal: Option<bool>,
+) -> Result<ScriptResult, String> {
+    core::run_script(&state, &connection, &tab, statements, reveal.unwrap_or(false))
+        .await
+        .map_err(format_err)
+}
+
+#[tauri::command]
+async fn end_transaction(state: State<'_, Core>, tab: String, commit: bool) -> Result<(), String> {
+    core::end_transaction(&state, &tab, commit).await.map_err(format_err)
+}
+
 #[tauri::command]
 async fn apply_mutations(
     state: State<'_, Core>,
@@ -684,6 +703,8 @@ pub fn run() {
             search_columns,
             describe_table,
             run_query,
+            run_script,
+            end_transaction,
             apply_mutations,
             export_query,
             write_file,
@@ -749,17 +770,21 @@ pub fn run_mcp() {
 }
 
 fn init_tracing(to_stderr: bool) {
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let builder = tracing_subscriber::fmt().with_env_filter(env_filter);
-    let _ = if to_stderr {
-        builder
-            .with_writer(std::io::stderr)
-            .with_ansi(false)
-            .try_init()
+    use tracing_subscriber::{filter::Targets, fmt, prelude::*, EnvFilter};
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let log = if to_stderr {
+        fmt::layer().with_writer(std::io::stderr).with_ansi(false).boxed()
     } else {
-        builder.try_init()
+        fmt::layer().boxed()
     };
+    // Postgres notices reach editor scripts only through sqlx's tracing
+    // events, at every level (RAISE INFO logs as TRACE); see core::script.
+    let notices = core::NoticeLayer
+        .with_filter(Targets::new().with_target(core::NoticeLayer::TARGET, tracing::Level::TRACE));
+    let _ = tracing_subscriber::registry()
+        .with(log.with_filter(env_filter))
+        .with(notices)
+        .try_init();
 }
 
 /// Regression guard for `design/mcp-connection-authority.md` Phase 4: the

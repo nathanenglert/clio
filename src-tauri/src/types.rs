@@ -231,6 +231,58 @@ pub struct RedactionMeta {
     pub note: String,
 }
 
+/// Outcome of one editor run: the statements a tab sent, run in order.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptResult {
+    /// One entry per statement that ran. The run stops at the first failure,
+    /// so a shorter list than was sent means the rest were skipped.
+    pub steps: Vec<ScriptStep>,
+    /// Rows from the last statement that returned columns, for the grid.
+    pub result: Option<QueryResult>,
+    /// Index into `steps` of the statement `result` came from.
+    pub result_step: Option<usize>,
+    /// The tab's transaction, when one is still open after the run.
+    pub transaction: Option<OpenTransaction>,
+    /// A failure not tied to one statement: no connection, or a pinned
+    /// transaction whose connection the server closed.
+    pub error: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptStep {
+    pub error: Option<String>,
+    /// Rows the statement changed. Postgres reports none for DO, DDL or
+    /// transaction control.
+    pub rows_affected: u64,
+    pub row_count: usize,
+    pub elapsed_ms: u64,
+    /// NOTICE/WARNING/INFO messages the statement raised.
+    pub notices: Vec<Notice>,
+    /// On a failed step: what its error undid.
+    pub rolled_back: Option<Undo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Notice {
+    pub severity: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Undo {
+    /// The whole open transaction was rolled back.
+    Transaction,
+    /// Only this run's statements were undone; the transaction stays open.
+    Run,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenTransaction {
+    pub opened_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ExportResult {
     pub row_count: usize,
