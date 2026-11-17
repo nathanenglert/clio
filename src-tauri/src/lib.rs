@@ -89,20 +89,6 @@ async fn describe_table(
         .map_err(format_err)
 }
 
-#[tauri::command]
-async fn run_query(
-    state: State<'_, Core>,
-    connection: String,
-    sql: String,
-    reveal: Option<bool>,
-) -> Result<QueryResult, String> {
-    // `reveal` is UI-only. Default false (mask). The MCP handler hardcodes
-    // false at the call site (see mcp.rs).
-    core::run_sql(&state, &connection, &sql, reveal.unwrap_or(false))
-        .await
-        .map_err(format_err)
-}
-
 /// Run a tab's statements in order — see `core::script`.
 #[tauri::command]
 async fn run_script(
@@ -443,7 +429,7 @@ const REVEAL_MENU_ID: &str = "view.reveal_sensitive";
 
 /// Tauri event name fired when the toggle state changes. Payload is the new
 /// `bool` value (true = revealing). The frontend listens to this to update
-/// global state and pass `reveal` into subsequent `run_query` calls.
+/// global state and pass `reveal` into subsequent `run_script` calls.
 const REVEAL_EVENT_NAME: &str = "reveal-sensitive";
 
 /// File menu Save / Save As items. Frontend listens for the matching events
@@ -702,7 +688,6 @@ pub fn run() {
             list_tables,
             search_columns,
             describe_table,
-            run_query,
             run_script,
             end_transaction,
             apply_mutations,

@@ -142,8 +142,8 @@ pub(super) fn strip_comments_lower(sql: &str) -> String {
 ///
 /// Used by the MCP `run_query` tool — agents must use `execute_statement`
 /// for writes/DDL so the human sees the permission card. The UI editor
-/// uses `run_sql` (no SELECT guard); the human typing in the editor is
-/// their own gate.
+/// uses `core::script::run_script` (no SELECT guard); the human typing in
+/// the editor is their own gate.
 ///
 /// `reveal` skips the redactor pass entirely. The MCP tool handler hardcodes
 /// `reveal: false`; only the Tauri UI command may pass `true`, and only when
@@ -163,28 +163,6 @@ pub async fn run_query(
     .await;
 
     // One-line summary for the activity strip; full SQL goes on `payload`.
-    let mut detail = sql.replace('\n', " ");
-    if detail.len() > 80 {
-        detail.truncate(77);
-        detail.push_str("...");
-    }
-    let payload = Some(cap_payload(sql));
-    core.record_ok_with_payload("run_query", detail, payload, started, &r);
-    r
-}
-
-/// Run any SQL statement from the UI editor. No SELECT-only guard and no
-/// policy gate — the human typed it, the human owns it. Records activity
-/// under the `run_query` tool name so existing UI filters keep matching.
-pub async fn run_sql(
-    core: &Core,
-    conn: &str,
-    sql: &str,
-    reveal: bool,
-) -> Result<QueryResult> {
-    let started = Instant::now();
-    let r = run_decoded(core, conn, sql, reveal, /* read_only */ false, None).await;
-
     let mut detail = sql.replace('\n', " ");
     if detail.len() > 80 {
         detail.truncate(77);

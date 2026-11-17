@@ -28,7 +28,7 @@ pub use lifecycle::{
     request_connect,
 };
 pub use mutations::apply_mutations;
-pub use query::{run_query, run_sql};
+pub use query::run_query;
 pub use saved_queries::{delete_saved_query, list_saved_queries, upsert_saved_query};
 pub use schema::{describe_table, list_schemas, list_tables, search_columns};
 pub use script::{end_transaction, run_script, NoticeLayer};
