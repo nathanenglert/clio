@@ -7,6 +7,8 @@
 //!  - CRUD over classifications stored in the metadata SQLite
 //!  - the scan record that carries classifications across renames and lets
 //!    the agent path notice schema changes since the last scan
+//!  - applying a linked shared file (core::sensitivity_file) during the scan,
+//!    and writing review decisions back to it
 //!
 //! The MCP server can call `list_classifications` and `classify_schema`
 //! (read-only-ish; classify is idempotent and only adds Pending suggestions
@@ -17,6 +19,7 @@ use futures_util::stream::{self, StreamExt};
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -25,11 +28,13 @@ use crate::connections::{self, ScannedColumn};
 use crate::pool::PoolAccess;
 use crate::types::{
     Category, Classification, ClassificationAction, ClassificationStatus, ClassifyOutcome,
+    SharedFileStatus, WaitingSafe,
 };
 
 use super::lineage::{self, StoredColumn, StoredLineage};
 use super::mutations::quote_ident;
 use super::redactor::RedactorView;
+use super::sensitivity_file::{self, Entry, SensitivityFile, Stamp};
 use super::Core;
 
 /// Compiled name-pattern set. Patterns are matched against `column_name`
@@ -130,6 +135,8 @@ pub(crate) fn classify_column(
 const UNREVIEWED_REASON: &str = "unreviewed text: redacted until marked safe";
 /// Reason for a Safe column that was dropped and recreated, or changed type.
 const RECREATED_REASON: &str = "column was recreated or changed type: review again";
+/// Reason for a column the linked shared file says to redact.
+const SHARED_FILE_REASON: &str = "from the shared file";
 
 /// Rows read per relation when sampling values.
 const SAMPLE_ROWS: u32 = 200;
@@ -159,11 +166,28 @@ type ColumnIdentity = (i32, i16, i32, String, String, String);
 pub struct ScanIndex {
     seen: Arc<Mutex<HashMap<String, Arc<HashSet<ColumnIdentity>>>>>,
     lock: Arc<Mutex<()>>,
+    /// The linked shared file as each connection's last scan read it. Absent
+    /// when the connection wasn't linked then.
+    file_stamps: Arc<Mutex<HashMap<String, Stamp>>>,
+    /// Serializes Clio's read-modify-write of shared files.
+    file_lock: Arc<Mutex<()>>,
 }
 
 impl ScanIndex {
     pub async fn forget(&self, conn: &str) {
         self.seen.lock().await.remove(conn);
+        self.file_stamps.lock().await.remove(conn);
+    }
+
+    /// After Clio writes `conn`'s linked file itself: if nothing else changed
+    /// the file since `conn`'s last scan, record the new stamp so the write
+    /// doesn't force a rescan. Other connections linked to the same file still
+    /// see it change, and rescan before their agents' next query.
+    async fn file_written(&self, conn: &str, before: Stamp, after: Stamp) {
+        let mut stamps = self.file_stamps.lock().await;
+        if stamps.get(conn) == Some(&before) {
+            stamps.insert(conn.to_string(), after);
+        }
     }
 }
 
@@ -176,6 +200,9 @@ struct CatalogColumn {
     table_oid: i32,
     attnum: i16,
     type_oid: i32,
+    /// `format_type(atttypid, NULL)`: what the shared file records for a safe
+    /// column.
+    type_name: String,
     /// `r` table, `p` partitioned, `v` view, `m` materialized view, `f` foreign.
     relkind: char,
     comment: Option<String>,
@@ -210,6 +237,7 @@ impl CatalogColumn {
 const CATALOG_SQL: &str = r#"
     SELECT n.nspname AS schema, c.relname AS table, a.attname AS column,
            c.oid::int AS table_oid, a.attnum AS attnum, a.atttypid::int AS type_oid,
+           format_type(a.atttypid, NULL) AS type_name,
            c.relkind::text AS relkind,
            col_description(c.oid, a.attnum) AS comment,
            coalesce(bt.typcategory = 'S'
@@ -255,6 +283,7 @@ async fn read_catalog(pool: &PgPool) -> Result<Vec<CatalogColumn>> {
                 table_oid: r.try_get("table_oid")?,
                 attnum: r.try_get("attnum")?,
                 type_oid: r.try_get("type_oid")?,
+                type_name: r.try_get("type_name")?,
                 relkind: r.try_get::<String, _>("relkind")?.chars().next().unwrap_or('r'),
                 comment: r.try_get("comment")?,
                 text_like: r.try_get("text_like")?,
@@ -279,6 +308,9 @@ struct ScanPlan {
     resets: Vec<Key>,
     /// New Pending classifications.
     suggestions: HashMap<Key, (Category, String)>,
+    /// Columns the shared file says to redact that aren't Confirmed as that
+    /// category yet. Written last, so they win over the rest of the plan.
+    file_redacts: Vec<(Key, Category)>,
     /// Indexes into the catalog of the columns to sample.
     sample: Vec<usize>,
 }
@@ -354,7 +386,9 @@ fn plan_scan(
 /// Run the classifier against `conn`'s live schema. Idempotent: it never
 /// overrides a stored classification, only adds Pending ones, carries
 /// classifications across renames, drops ones whose column is gone, and
-/// sends a recreated Safe column back to review.
+/// sends a recreated Safe column back to review. On a connection linked to a
+/// shared file, the file's redactions override all of that; its safe entries
+/// only wait for a human (see design/shared-sensitivity-file.md).
 ///
 /// Returns counts so the UI can decide whether to show the post-connect toast.
 pub async fn classify_schema(core: &Core, conn: &str) -> Result<ClassifyOutcome> {
@@ -366,6 +400,9 @@ pub async fn classify_schema(core: &Core, conn: &str) -> Result<ClassifyOutcome>
 
         // Connection id is required for the FK in sensitivity_classifications.
         let connection = connections::get(&core.meta, conn).await?;
+        // A linked file that can't be read fails the scan, like a catalog that
+        // can't be read: agents are refused until it's fixed or unlinked.
+        let linked = load_linked(core, &connection.id).await?;
         let existing = connections::list_classifications(&core.meta, &connection.id).await?;
         let prev: HashMap<Key, ScannedColumn> =
             connections::list_scanned(&core.meta, &connection.id)
@@ -392,6 +429,9 @@ pub async fn classify_schema(core: &Core, conn: &str) -> Result<ClassifyOutcome>
             }
         }
 
+        if let Some(l) = &linked {
+            plan_file_redactions(&current, &existing, &l.file, &mut plan);
+        }
         inherit_into_views(&pool, &current, &existing, &mut plan).await?;
 
         let id = &connection.id;
@@ -431,6 +471,29 @@ pub async fn classify_schema(core: &Core, conn: &str) -> Result<ClassifyOutcome>
             )
             .await?;
         }
+        for ((schema, table, column), category) in &plan.file_redacts {
+            connections::upsert_confirmed(
+                &core.meta,
+                id,
+                schema,
+                table,
+                column,
+                *category,
+                SHARED_FILE_REASON,
+            )
+            .await?;
+        }
+        let shared_safe_waiting = match &linked {
+            Some(l) => {
+                let types: HashMap<Key, String> =
+                    current.iter().map(|c| (c.key(), c.type_name.clone())).collect();
+                let redacting = redacting_keys(
+                    &connections::list_classifications(&core.meta, id).await?,
+                );
+                sensitivity_file::waiting_safe(&l.file, &types, &redacting).len() as u32
+            }
+            None => 0,
+        };
 
         // Record what this scan saw. A column queued for sampling whose read
         // didn't finish stays unsampled, so the next scan tries again.
@@ -467,6 +530,13 @@ pub async fn classify_schema(core: &Core, conn: &str) -> Result<ClassifyOutcome>
             .lock()
             .await
             .insert(conn.to_string(), Arc::new(current.iter().map(CatalogColumn::identity).collect()));
+        {
+            let mut stamps = core.scans.file_stamps.lock().await;
+            match &linked {
+                Some(l) => stamps.insert(conn.to_string(), l.stamp),
+                None => stamps.remove(conn),
+            };
+        }
         core.pools.mark_classified(conn).await;
 
         let already_classified = (existing.len() - plan.stale.len()) as u32;
@@ -475,11 +545,273 @@ pub async fn classify_schema(core: &Core, conn: &str) -> Result<ClassifyOutcome>
             new_pending,
             already_classified,
             total_classified: already_classified + new_pending,
+            shared_safe_waiting,
         })
     }
     .await;
     core.record_ok("classify_schema", conn, started, &r);
     r
+}
+
+// ── Shared file ─────────────────────────────────────────────────────
+
+/// A connection's linked shared file, as read for one scan.
+struct Linked {
+    file: SensitivityFile,
+    stamp: Stamp,
+}
+
+/// Read the file `connection_id` links to. `None` when it isn't linked; `Err`
+/// when it is but the file is missing or doesn't parse.
+async fn load_linked(core: &Core, connection_id: &str) -> Result<Option<Linked>> {
+    let Some(path) = connections::get_sensitivity_file(&core.meta, connection_id).await? else {
+        return Ok(None);
+    };
+    let path = Path::new(&path);
+    // Stamp first: a change between the two reads leaves an older stamp, so
+    // the next agent query rescans.
+    let stamp = sensitivity_file::stamp(path);
+    let file = sensitivity_file::load(path)
+        .with_context(|| "fix the file or unlink it in the Sensitivity panel")?;
+    Ok(Some(Linked { file, stamp }))
+}
+
+/// Queue the shared file's redactions: each listed column that exists is
+/// Confirmed with the file's category unless it already is, and the scan
+/// doesn't suggest it. Safe entries never apply here.
+fn plan_file_redactions(
+    current: &[CatalogColumn],
+    existing: &[Classification],
+    file: &SensitivityFile,
+    plan: &mut ScanPlan,
+) {
+    let moved: HashMap<&Key, &Key> = plan.moves.iter().map(|(a, b)| (a, b)).collect();
+    let mut local: HashMap<Key, (ClassificationStatus, Category)> = HashMap::new();
+    for c in existing {
+        let k = key_of(c);
+        if plan.stale.contains(&k) {
+            continue;
+        }
+        local.insert(moved.get(&k).map_or(k.clone(), |nk| (*nk).clone()), (c.status, c.category));
+    }
+    for c in current {
+        let k = c.key();
+        let Some(Entry::Redact { category }) = file.columns.get(&k) else {
+            continue;
+        };
+        plan.suggestions.remove(&k);
+        if local.get(&k) != Some(&(ClassificationStatus::Confirmed, *category)) {
+            plan.file_redacts.push((k, *category));
+        }
+    }
+}
+
+fn redacting_keys(classifications: &[Classification]) -> HashSet<Key> {
+    classifications
+        .iter()
+        .filter(|c| c.status != ClassificationStatus::Safe)
+        .map(key_of)
+        .collect()
+}
+
+/// `format_type(atttypid, NULL)` of each of `keys` that exists.
+async fn column_types(pool: &PgPool, keys: &[Key]) -> Result<HashMap<Key, String>> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (schemas, (tables, columns)): (Vec<&str>, (Vec<&str>, Vec<&str>)) =
+        keys.iter().map(|(s, t, c)| (s.as_str(), (t.as_str(), c.as_str()))).unzip();
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        r#"SELECT n.nspname::text, c.relname::text, a.attname::text, format_type(a.atttypid, NULL)
+           FROM unnest($1::text[], $2::text[], $3::text[]) AS k(s, t, col)
+           JOIN pg_namespace n ON n.nspname = k.s
+           JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = k.t
+           JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = k.col
+                              AND a.attnum > 0 AND NOT a.attisdropped"#,
+    )
+    .bind(&schemas)
+    .bind(&tables)
+    .bind(&columns)
+    .fetch_all(pool)
+    .await
+    .with_context(|| "read column types")?;
+    Ok(rows.into_iter().map(|(s, t, c, ty)| ((s, t, c), ty)).collect())
+}
+
+/// Whether `conn`'s linked file changed since its last scan read it.
+async fn shared_file_changed(core: &Core, conn: &str) -> Result<bool> {
+    let connection = connections::get(&core.meta, conn).await?;
+    let Some(path) = connections::get_sensitivity_file(&core.meta, &connection.id).await? else {
+        return Ok(false);
+    };
+    let now = sensitivity_file::stamp(Path::new(&path));
+    Ok(core.scans.file_stamps.lock().await.get(conn) != Some(&now))
+}
+
+/// On a linked connection, record a review decision in the shared file. Runs
+/// before the local change, so a failed write changes nothing.
+async fn write_back(
+    core: &Core,
+    conn: &str,
+    connection_id: &str,
+    key: Key,
+    action: &ClassificationAction,
+) -> Result<()> {
+    let Some(path) = connections::get_sensitivity_file(&core.meta, connection_id).await? else {
+        return Ok(());
+    };
+    let local = || async {
+        connections::list_classifications(&core.meta, connection_id)
+            .await
+            .map(|all| all.into_iter().find(|c| key_of(c) == key))
+    };
+    let entry = match action {
+        ClassificationAction::AddManual { category } => Entry::Redact { category: *category },
+        ClassificationAction::Confirm => match local().await? {
+            Some(c) => Entry::Redact { category: c.category },
+            None => return Ok(()),
+        },
+        ClassificationAction::SetCategory { category } => match local().await? {
+            Some(c) if c.status == ClassificationStatus::Confirmed => {
+                Entry::Redact { category: *category }
+            }
+            _ => return Ok(()),
+        },
+        ClassificationAction::MarkSafe => {
+            let pool = core.pool(conn).await?;
+            let types = column_types(&pool, std::slice::from_ref(&key)).await?;
+            let type_name = types.get(&key).cloned().with_context(|| {
+                format!("{}.{}.{} no longer exists", key.0, key.1, key.2)
+            })?;
+            Entry::Safe { type_name }
+        }
+    };
+    let _write = core.scans.file_lock.lock().await;
+    let path = Path::new(&path);
+    let before = sensitivity_file::stamp(path);
+    let mut file = sensitivity_file::load(path)?;
+    if file.columns.get(&key) == Some(&entry) {
+        return Ok(());
+    }
+    file.columns.insert(key, entry);
+    sensitivity_file::save(path, &file)?;
+    core.scans.file_written(conn, before, sensitivity_file::stamp(path)).await;
+    Ok(())
+}
+
+/// Link `conn` to the shared file at `path`, creating it if it doesn't exist.
+/// This connection's reviewed decisions for columns the file doesn't list are
+/// added to it; then a rescan applies the file. Returns how many were added.
+pub async fn link_sensitivity_file(core: &Core, conn: &str, path: &str) -> Result<u32> {
+    let started = Instant::now();
+    let r = async {
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            anyhow::bail!("the shared file path must be absolute");
+        }
+        let pool = core.pool(conn).await?;
+        let connection = connections::get(&core.meta, conn).await?;
+        let added = {
+            let _write = core.scans.file_lock.lock().await;
+            let exists = path.exists();
+            let mut file =
+                if exists { sensitivity_file::load(&path)? } else { SensitivityFile::default() };
+            let reviewed: Vec<Classification> =
+                connections::list_classifications(&core.meta, &connection.id)
+                    .await?
+                    .into_iter()
+                    .filter(|c| c.status != ClassificationStatus::Pending)
+                    .collect();
+            let safe: Vec<Key> = reviewed
+                .iter()
+                .filter(|c| c.status == ClassificationStatus::Safe)
+                .map(key_of)
+                .collect();
+            let types = column_types(&pool, &safe).await?;
+            let mut added = 0u32;
+            for c in &reviewed {
+                let k = key_of(c);
+                if file.columns.contains_key(&k) {
+                    continue;
+                }
+                let entry = match (c.status, types.get(&k)) {
+                    (ClassificationStatus::Confirmed, _) => Entry::Redact { category: c.category },
+                    (ClassificationStatus::Safe, Some(t)) => Entry::Safe { type_name: t.clone() },
+                    _ => continue,
+                };
+                file.columns.insert(k, entry);
+                added += 1;
+            }
+            if added > 0 || !exists {
+                sensitivity_file::save(&path, &file)?;
+            }
+            added
+        };
+        connections::set_sensitivity_file(
+            &core.meta,
+            &connection.id,
+            Some(&path.to_string_lossy()),
+        )
+        .await?;
+        classify_schema(core, conn).await?;
+        Ok::<_, anyhow::Error>(added)
+    }
+    .await;
+    core.record_ok("link_sensitivity_file", conn, started, &r);
+    r
+}
+
+/// Unlink `conn` from its shared file. Its classifications stay as they are.
+pub async fn unlink_sensitivity_file(core: &Core, conn: &str) -> Result<()> {
+    let started = Instant::now();
+    let r = async {
+        let connection = connections::get(&core.meta, conn).await?;
+        connections::set_sensitivity_file(&core.meta, &connection.id, None).await?;
+        core.scans.file_stamps.lock().await.remove(conn);
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    core.record_ok("unlink_sensitivity_file", conn, started, &r);
+    r
+}
+
+/// The linked file and the columns it marks safe that still redact here, for
+/// the review panel. `None` when `conn` isn't linked. A file that can't be
+/// read comes back as `error`, not `Err`, so the panel can show it. Waiting
+/// columns need the live types, so a closed connection lists none.
+pub async fn sensitivity_file_status(core: &Core, conn: &str) -> Result<Option<SharedFileStatus>> {
+    let connection = connections::get(&core.meta, conn).await?;
+    let Some(path) = connections::get_sensitivity_file(&core.meta, &connection.id).await? else {
+        return Ok(None);
+    };
+    let file = match sensitivity_file::load(Path::new(&path)) {
+        Ok(f) => f,
+        Err(e) => {
+            return Ok(Some(SharedFileStatus { path, error: Some(format!("{e:#}")), waiting: vec![] }))
+        }
+    };
+    let local = connections::list_classifications(&core.meta, &connection.id).await?;
+    let redacting = redacting_keys(&local);
+    let candidates: Vec<Key> = file
+        .columns
+        .iter()
+        .filter(|(k, e)| matches!(e, Entry::Safe { .. }) && redacting.contains(*k))
+        .map(|(k, _)| k.clone())
+        .collect();
+    let types = match core.pool(conn).await {
+        Ok(pool) => column_types(&pool, &candidates).await?,
+        Err(_) => HashMap::new(),
+    };
+    let waiting = sensitivity_file::waiting_safe(&file, &types, &redacting)
+        .into_iter()
+        .map(|k| WaitingSafe {
+            reason: local.iter().find(|c| key_of(c) == k).map(|c| c.reason.clone()).unwrap_or_default(),
+            schema: k.0,
+            table: k.1,
+            column: k.2,
+        })
+        .collect();
+    Ok(Some(SharedFileStatus { path, error: None, waiting }))
 }
 
 // ── Inheritance ─────────────────────────────────────────────────────
@@ -520,6 +852,10 @@ async fn inherit_into_views(
     ) {
         by_name.entry(k.1.to_ascii_lowercase()).or_default().insert(k.2.to_ascii_lowercase());
         category.entry(k.2.to_ascii_lowercase()).or_insert(cat);
+    }
+    for (k, cat) in &plan.file_redacts {
+        redacts(k, *cat, &mut by_name, &mut category);
+        taken.insert(k.clone());
     }
     for c in existing {
         let k = key_of(c);
@@ -750,8 +1086,10 @@ const DRIFT_SQL: &str = r#"
 /// changed since the last scan: a new table or view, a new column, a rename,
 /// a type change. Otherwise the agent could read a column the classifier has
 /// never seen. Covers changes made outside the workbench too (a deploy's
-/// migration, psql). The human path skips it. SQL that doesn't parse names no
-/// relations here; lineage's text fallbacks handle it.
+/// migration, psql). Also rescan when the linked shared file changed, so a
+/// redaction added to it applies before this query. The human path skips it.
+/// SQL that doesn't parse names no relations here; lineage's text fallbacks
+/// handle it.
 pub(super) async fn ensure_scan_current(
     core: &Core,
     conn: &str,
@@ -759,6 +1097,12 @@ pub(super) async fn ensure_scan_current(
     sql: &str,
 ) -> Result<()> {
     if !matches!(core.pool_access, PoolAccess::Agent) {
+        return Ok(());
+    }
+    if shared_file_changed(core, conn).await? {
+        classify_schema(core, conn).await.with_context(|| {
+            "the shared sensitivity file changed since the last sensitivity scan, and the rescan failed"
+        })?;
         return Ok(());
     }
     let names: Vec<String> = lineage::relation_names(sql).into_iter().collect();
@@ -1032,6 +1376,8 @@ pub async fn update_classification(
     let detail = format!("{conn}/{schema}.{table}.{column}");
     let r = async {
         let connection = connections::get(&core.meta, conn).await?;
+        let key = (schema.to_string(), table.to_string(), column.to_string());
+        write_back(core, conn, &connection.id, key, &action).await?;
         match action {
             ClassificationAction::Confirm => {
                 connections::set_classification_status(
@@ -1155,6 +1501,7 @@ mod tests {
             table_oid: oid,
             attnum,
             type_oid,
+            type_name: if type_oid == TEXT { "text" } else { "bigint" }.into(),
             relkind: 'r',
             comment: None,
             text_like: type_oid == TEXT,
@@ -1246,6 +1593,67 @@ mod tests {
         // The moved classification covers it; no new suggestion or sample.
         assert!(plan.suggestions.is_empty());
         assert!(plan.sample.is_empty());
+    }
+
+    #[test]
+    fn shared_file_redactions_override_local_state() {
+        let current = vec![
+            col("leads", "notes", 10, 2, TEXT),
+            col("leads", "status", 10, 3, TEXT),
+            col("leads", "score", 10, 4, INT8),
+            col("leads", "email", 10, 5, TEXT),
+            col("patients", "tax_id", 11, 2, TEXT),
+        ];
+        let local = |table: &str, column: &str, status, category| Classification {
+            schema: "public".into(),
+            table: table.into(),
+            column: column.into(),
+            category,
+            status,
+            reason: "test".into(),
+            created_at: 0,
+        };
+        let existing = vec![
+            local("leads", "notes", ClassificationStatus::Safe, Category::Pii),
+            local("leads", "email", ClassificationStatus::Confirmed, Category::Pii),
+            local("patients", "ssn", ClassificationStatus::Confirmed, Category::Pii),
+        ];
+        let mut file = SensitivityFile::default();
+        for (c, e) in [
+            (k("leads", "notes"), Entry::Redact { category: Category::Phi }),
+            (k("leads", "status"), Entry::Safe { type_name: "text".into() }),
+            (k("leads", "score"), Entry::Redact { category: Category::Pci }),
+            (k("leads", "email"), Entry::Redact { category: Category::Pii }),
+            (k("patients", "tax_id"), Entry::Redact { category: Category::Phi }),
+            (k("gone", "col"), Entry::Redact { category: Category::Pii }),
+        ] {
+            file.columns.insert(c, e);
+        }
+        let mut plan = ScanPlan::default();
+        plan.suggestions.insert(k("leads", "status"), (Category::Pii, UNREVIEWED_REASON.into()));
+        plan.suggestions.insert(k("leads", "score"), (Category::Pci, "sampled".into()));
+        // `ssn` was renamed to `tax_id` in this scan.
+        plan.moves.push((k("patients", "ssn"), k("patients", "tax_id")));
+
+        plan_file_redactions(&current, &existing, &file, &mut plan);
+
+        let mut redacts = plan.file_redacts.clone();
+        redacts.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            redacts,
+            vec![
+                // Local Safe loses to the file; so does the category of a rename.
+                (k("leads", "notes"), Category::Phi),
+                (k("leads", "score"), Category::Pci),
+                (k("patients", "tax_id"), Category::Phi),
+            ],
+            "already Confirmed as the file's category: `email` isn't rewritten; \
+             a column that doesn't exist here is skipped"
+        );
+        // A file redaction replaces the scan's suggestion; a safe entry leaves
+        // the suggestion (and so the redaction) in place.
+        assert!(!plan.suggestions.contains_key(&k("leads", "score")));
+        assert!(plan.suggestions.contains_key(&k("leads", "status")));
     }
 
     #[test]

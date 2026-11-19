@@ -948,6 +948,14 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   box-shadow: 0 0 0 2px var(--bg-app);
 }
 .tab.agent .tab-dirty { background: var(--agent); }
+/* An open transaction: gold ring, so it reads apart from the dirty dot. */
+.tab-tx {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1.5px solid var(--op-write);
+  flex: 0 0 auto;
+}
 
 .tab-close {
   background: transparent;
@@ -1053,6 +1061,16 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
 .editor-btn.primary-write:hover:not(:disabled) {
   background: rgba(212, 161, 85, 0.14);
   border-color: rgba(212, 161, 85, 0.7);
+}
+.editor-btn.primary-destruct {
+  color: var(--op-destruct);
+  border: 1px solid rgba(217, 108, 84, 0.45);
+  background: rgba(217, 108, 84, 0.08);
+  padding: 4px 10px;
+}
+.editor-btn.primary-destruct:hover:not(:disabled) {
+  background: rgba(217, 108, 84, 0.14);
+  border-color: rgba(217, 108, 84, 0.7);
 }
 
 .kbd {
@@ -2410,8 +2428,9 @@ body.dragging-y * { cursor: inherit !important; }
 }
 .sens-summary {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--line-faint);
   font-size: var(--fs-xs);
@@ -2419,11 +2438,99 @@ body.dragging-y * { cursor: inherit !important; }
   background: var(--bg-canvas);
 }
 .sens-summary .spacer { flex: 1; }
+/* Keep each count with its label; the hint gets its own line. */
+.sens-summary > span:not(.sens-summary-hint) { white-space: nowrap; }
+.sens-summary > .sens-summary-hint {
+  flex-basis: 100%;
+  max-width: none;
+  text-align: left;
+}
+/* Identifiers truncate (full value in the tooltip); prose wraps. Buttons
+   never wrap. */
+.sensitivity-modal .editor-btn { white-space: nowrap; flex-shrink: 0; }
+.sensitivity-modal .review-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sens-qname {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.sens-qname > span {
+  min-width: 3ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sens-qname > span:last-child { min-width: 0; }
+.sens-qname > .sep { flex-shrink: 0; min-width: 0; }
+.sens-group-head .sens-qname { flex: 0 1 auto; }
 .sens-summary-hint {
   font-size: 10.5px;
   color: var(--text-muted);
   text-align: right;
   max-width: 380px;
+}
+.sens-share {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line-faint);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  background: var(--bg-canvas);
+}
+.sens-share .spacer { flex: 1; }
+.sens-share .editor-btn {
+  padding: 2px 8px;
+  font-size: 10.5px;
+}
+.sens-share .sens-summary-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+  text-align: left;
+  text-wrap: balance;
+}
+.sens-share-label { flex: 0 0 auto; white-space: nowrap; }
+.sens-share-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The folder gives way before the file name does. */
+.sens-share-path {
+  flex: 0 1000 auto;
+  min-width: 0;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+.sens-share-error > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.sens-group.waiting .sens-group-head > span { flex: 0 0 auto; white-space: nowrap; }
+.sens-group.waiting .sens-group-head > .sens-summary-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.sens-wait-table {
+  flex: 0 1 auto;
+  max-width: 30%;
+  color: var(--text-muted);
+  font-size: 10.5px;
 }
 .sens-body {
   flex: 1;
@@ -2478,9 +2585,12 @@ body.dragging-y * { cursor: inherit !important; }
   text-align: center;
 }
 .sens-col {
-  flex: 0 0 auto;
+  /* Fixed, so the pills line up down the list. */
+  flex: 0 0 180px;
   color: var(--text-primary);
-  min-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sens-cat-pill {
   flex: 0 0 auto;
@@ -3342,4 +3452,127 @@ body.dragging-y * { cursor: inherit !important; }
 .ws-mode-seg button.on {
   background: var(--bg-elevated-2);
   color: var(--text-primary);
+}
+
+/* ── Script runs ──────────────────────────────────────────────────── */
+
+/* Pill and toggle keep their size; the echoed SQL is what gives way. */
+.result-toolbar .status-pill { flex: 0 0 auto; white-space: nowrap; }
+.result-toolbar .result-sql { flex: 0 1 auto; min-width: 0; }
+.result-view-seg { margin-left: 8px; flex: 0 0 auto; }
+.result-view-seg button { white-space: nowrap; }
+
+.run-messages {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 0;
+  font-size: 11.5px;
+}
+.run-msg-error {
+  margin: 4px 14px 8px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--op-destruct);
+  background: rgba(217, 108, 84, 0.06);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  font-size: 11.5px;
+}
+.run-step { padding: 0 0 2px; }
+.run-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 4px 14px;
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.run-step-head:hover { background: var(--bg-elevated); }
+.run-step-glyph { width: 10px; flex: 0 0 auto; }
+.run-step--ok .run-step-glyph { color: var(--op-read); }
+.run-step--err .run-step-glyph { color: var(--op-destruct); }
+.run-step--skipped .run-step-head { color: var(--text-faint); }
+.run-step-n { color: var(--text-faint); flex: 0 0 auto; }
+.run-step-sql {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.run-step--skipped .run-step-sql { color: var(--text-faint); }
+.run-step-outcome { flex: 0 0 auto; color: var(--text-secondary); }
+.run-step--err .run-step-outcome { color: var(--op-destruct); }
+.run-step-ms {
+  flex: 0 0 64px;
+  text-align: right;
+  color: var(--text-faint);
+}
+.run-notice,
+.run-step-error,
+.run-step-undo {
+  margin: 2px 14px 4px 54px;
+}
+.run-notice {
+  display: flex;
+  gap: 8px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+}
+.run-notice-sev {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.run-notice--warning .run-notice-sev { color: var(--op-write); }
+.run-step-error {
+  padding: 6px 10px;
+  border-left: 2px solid var(--op-destruct);
+  background: rgba(217, 108, 84, 0.06);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  font-size: 11.5px;
+}
+.run-step-undo {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+
+/* The tab's open transaction, in the editor toolbar. */
+.tx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 4px 0 10px;
+  margin-right: 8px;
+  border: 1px solid rgba(212, 161, 85, 0.35);
+  background: var(--op-write-soft);
+  border-radius: 5px;
+  font-size: var(--fs-sm);
+  color: var(--op-write);
+}
+.tx-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--op-write);
+}
+.tx-chip-label { font-weight: 600; }
+.tx-chip-time { color: var(--text-secondary); font-size: 11px; }
+.tx-chip-btn { height: 20px; padding: 0 8px; font-size: 11px; }
+.status-tx--active { color: var(--op-write); }
+
+.tx-confirm { width: min(460px, 90vw); }
+.tx-confirm-body {
+  padding: 14px 16px;
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  color: var(--text-secondary);
 }

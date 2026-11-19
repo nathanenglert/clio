@@ -16,7 +16,7 @@ import {
   type PermissionVerdict,
 } from "./lib/api";
 import { SchemaTree } from "./components/SchemaTree";
-import { Workspace } from "./components/Workspace";
+import { Workspace, type RunTarget } from "./components/Workspace";
 import { AgentSurface } from "./components/AgentSurface";
 import { PermissionCard } from "./components/PermissionCard";
 import { BulkMigrationCard } from "./components/BulkMigrationCard";
@@ -28,12 +28,15 @@ import { AddConnectionModal } from "./components/AddConnectionModal";
 import { McpConfigModal } from "./components/McpConfigModal";
 import { PendingTray } from "./components/PendingTray";
 import { ReviewModal } from "./components/ReviewModal";
+import { Modal } from "./components/Modal";
+import { useElapsed } from "./components/TransactionChip";
 import { SensitivityModal } from "./components/SensitivityModal";
 import { Splitter } from "./components/Splitter";
 import { Lunate, ClioWord, RecordMeta } from "./components/brand";
 import { ToastHost, showToast } from "./components/Toast";
 import { useResizable } from "./lib/useResizable";
 import { useTabs } from "./lib/useTabs";
+import { splitStatements } from "./lib/sqlStatements";
 import { useEditing } from "./lib/useEditing";
 import { useIntellisense } from "./lib/useIntellisense";
 import { useSnippets } from "./lib/useSnippets";
@@ -244,30 +247,57 @@ export function App() {
     [events],
   );
 
+  // Run `text` (one or more statements) in a tab. `offset` is where `text`
+  // sits in the tab's SQL, so the run's statements map back to the editor.
   const runTabQuery = useCallback(
-    async (tabId: string, sql: string) => {
+    async (tabId: string, text: string, offset = 0) => {
       if (!activeName) return;
+      const stmts = splitStatements(text).map((st) => ({ ...st, from: st.from + offset, to: st.to + offset }));
+      if (stmts.length === 0) {
+        tabs.updateTab(tabId, { error: "Nothing to run — only comments or whitespace.", result: null, lastRun: null });
+        return;
+      }
       tabs.updateTab(tabId, { running: true, error: null });
       try {
-        const result = await api.run_query(activeName, sql, reveal);
-        tabs.updateTab(tabId, { result, running: false, dirty: false });
+        const script = await api.run_script(activeName, tabId, stmts.map((st) => st.sql), reveal);
+        const failed = script.steps.find((st) => st.error);
+        const grid = !!script.result && script.result.columns.length > 0;
+        const messages =
+          stmts.length > 1 ||
+          !!script.error ||
+          script.steps.some((st) => st.notices.length > 0 || st.rolled_back);
+        tabs.updateTab(tabId, {
+          running: false,
+          dirty: false,
+          result: script.result,
+          // A lone statement's error shows where it always has; a script's
+          // shows in its messages, next to the statements that did run.
+          error: script.error ?? (stmts.length === 1 ? failed?.error ?? null : null),
+          lastRun: { statements: stmts, script },
+          tx: script.transaction ? { openedAtMs: script.transaction.opened_at_ms } : null,
+          // Messages when there's no grid to show, or a failure undid work —
+          // what was rolled back matters more than the error pill alone.
+          resultView:
+            messages && (!grid || (!!failed && (stmts.length > 1 || !!failed.rolled_back)))
+              ? "messages"
+              : "results",
+        });
       } catch (e) {
-        tabs.updateTab(tabId, { error: String(e), running: false, result: null });
+        tabs.updateTab(tabId, { error: String(e), running: false, result: null, lastRun: null });
       }
     },
     [tabs, activeName, reveal],
   );
 
   const runActive = useCallback(
-    async (sqlOverride?: string) => {
+    async (target?: RunTarget) => {
       const tab = tabs.activeTab;
       if (!tab || !activeName) return;
       if (!active?.connected) {
         tabs.updateTab(tab.id, { error: "Not connected. Click a connection in the rail.", result: null });
         return;
       }
-      const sql = sqlOverride && sqlOverride.trim().length > 0 ? sqlOverride : tab.sql;
-      await runTabQuery(tab.id, sql);
+      await runTabQuery(tab.id, target?.text ?? tab.sql, target?.offset ?? 0);
     },
     [tabs, activeName, active?.connected, runTabQuery],
   );
@@ -275,13 +305,81 @@ export function App() {
   // When the reveal toggle flips, re-run the active tab's last query so the
   // user immediately sees real or fake values per the new state. Background
   // tabs stay stale until the user switches to them — predictable, and avoids
-  // a stampede of queries on toggle.
+  // a stampede of queries on toggle. Only a lone read re-runs: repeating a
+  // script or a write would repeat its changes.
   useEffect(() => {
     const tab = tabs.activeTab;
-    if (!tab || !active?.connected || !tab.result) return;
-    void runTabQuery(tab.id, tab.sql);
+    const only = tab?.lastRun?.statements.length === 1 ? tab.lastRun.statements[0] : null;
+    if (!tab || !active?.connected || !tab.result || !only) return;
+    if (!/^(select|table|values|show|with)\b/i.test(only.sql)) return;
+    if (/\b(insert|update|delete|merge)\b/i.test(only.sql)) return;
+    void runTabQuery(tab.id, only.sql, only.from);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reveal]);
+
+  // ── Open transactions ─────────────────────────────────────────
+  const endTransaction = useCallback(
+    async (tabId: string, commit: boolean) => {
+      tabs.updateTab(tabId, { running: true });
+      try {
+        await api.end_transaction(tabId, commit);
+        tabs.updateTab(tabId, { running: false, tx: null });
+        showToast(commit ? "Committed" : "Rolled back", "ok");
+      } catch (e) {
+        // Either way the transaction is over: a failed COMMIT rolls back.
+        tabs.updateTab(tabId, { running: false, tx: null, error: String(e) });
+        showToast(commit ? "Commit failed — the transaction was rolled back" : "Roll back failed", "err");
+      }
+    },
+    [tabs],
+  );
+
+  // Closing a tab or disconnecting rolls back its open transaction, so ask
+  // first. Tauri's webview drops window.confirm — this is an inline modal.
+  type TxConfirm = { title: string; body: string; action: string; resolve: (ok: boolean) => void };
+  const [txConfirm, setTxConfirm] = useState<TxConfirm | null>(null);
+  const askTx = (c: Omit<TxConfirm, "resolve">) =>
+    new Promise<boolean>((resolve) => setTxConfirm({ ...c, resolve }));
+  const settleTx = (ok: boolean) => {
+    txConfirm?.resolve(ok);
+    setTxConfirm(null);
+  };
+
+  const requestCloseTab = useCallback(
+    async (id: string) => {
+      const tab = tabs.tabs.find((t) => t.id === id);
+      if (tab?.tx) {
+        const ok = await askTx({
+          title: "Roll back and close?",
+          body: `“${tab.title}” has an open transaction. Closing the tab rolls it back; nothing in it is committed.`,
+          action: "Roll back & close",
+        });
+        if (!ok) return;
+        await api.end_transaction(id, false).catch(() => {});
+      }
+      tabs.closeTab(id);
+    },
+    [tabs],
+  );
+
+  const confirmDisconnect = useCallback(
+    async (name: string) => {
+      if (name !== activeName) return true;
+      const open = tabs.tabs.filter((t) => t.tx);
+      if (open.length === 0) return true;
+      const ok = await askTx({
+        title: "Disconnect and roll back?",
+        body: `${open.length === 1 ? `“${open[0].title}” has` : `${open.length} tabs have`} an open transaction on ${name}. Disconnecting rolls ${open.length === 1 ? "it" : "them"} back; nothing in ${open.length === 1 ? "it" : "them"} is committed.`,
+        action: "Roll back & disconnect",
+      });
+      // The backend rolls them back on disconnect.
+      if (ok) for (const t of open) tabs.updateTab(t.id, { tx: null });
+      return ok;
+    },
+    [tabs, activeName],
+  );
+  const activeTxElapsed = useElapsed(tabs.activeTab?.tx?.openedAtMs ?? null);
+  const otherTxCount = tabs.tabs.filter((t) => t.tx && t.id !== tabs.activeTab?.id).length;
 
   // ── Commit pending changes ─────────────────────────────────────
   const trayTab = tabs.activeTab;
@@ -296,6 +394,12 @@ export function App() {
 
   const doCommit = useCallback(async () => {
     if (!trayTab || !traySchema || !trayTable) return;
+    // Grid edits commit on their own connection; behind this tab's open
+    // transaction they could wait forever on its row locks.
+    if (trayTab.tx) {
+      setCommitError("This tab has an open transaction. Commit or roll it back first — grid edits commit separately.");
+      return;
+    }
     setCommitError(null);
     const outcome = await editing.commit({
       id: trayTab.id,
@@ -586,8 +690,13 @@ export function App() {
   // Idempotent on the backend: re-connecting an already-classified database
   // returns new_pending: 0, which we suppress. A null outcome means the scan
   // failed: the human can still query, but agents are refused the connection.
+  // Columns the shared file marks safe that still redact here come first:
+  // they're the ones waiting on the human.
   const onConnected = useCallback(
-    (name: string, outcome: { new_pending: number; total_classified: number } | null) => {
+    (
+      name: string,
+      outcome: { new_pending: number; shared_safe_waiting: number } | null,
+    ) => {
       if (!outcome) {
         showToast(
           <span>
@@ -598,16 +707,20 @@ export function App() {
         );
         return;
       }
-      if (outcome.new_pending === 0) return;
-      const n = outcome.new_pending;
+      const waiting = outcome.shared_safe_waiting;
+      if (outcome.new_pending === 0 && waiting === 0) return;
+      const n = waiting || outcome.new_pending;
       showToast(
         (
           <span>
             <span aria-hidden style={{ color: "var(--privacy)", marginRight: 6 }}>
               ◌
             </span>
-            <span className="mono">{n}</span> column{n === 1 ? "" : "s"} auto-classified
-            as sensitive on <span className="mono">{name}</span>
+            <span className="mono">{n}</span> column{n === 1 ? "" : "s"}{" "}
+            {waiting
+              ? "marked safe in the shared file still redacted"
+              : "auto-classified as sensitive"}{" "}
+            on <span className="mono">{name}</span>
           </span>
         ),
         "info",
@@ -663,6 +776,7 @@ export function App() {
           onRunLibrary={onRunSavedQuery}
           onDeleteLibrary={onDeleteSavedQuery}
           onConnectingChange={setConnectingConn}
+          confirmDisconnect={confirmDisconnect}
         />
         <Splitter
           orientation="vertical"
@@ -694,10 +808,12 @@ export function App() {
           tabs={tabs.tabs}
           activeTab={tabs.activeTab}
           onSelectTab={tabs.setActive}
-          onCloseTab={tabs.closeTab}
+          onCloseTab={requestCloseTab}
           onAddTab={tabs.addScratchTab}
           onSqlChange={(id, sql) => tabs.setSql(id, sql)}
           onRun={runActive}
+          onEndTransaction={(commit) => tabs.activeTab && endTransaction(tabs.activeTab.id, commit)}
+          onResultView={(view) => tabs.activeTab && tabs.updateTab(tabs.activeTab.id, { resultView: view })}
           onSave={onSave}
           onSaveAs={onSaveAs}
           onOpenMcpModal={() => setShowMcp(true)}
@@ -841,6 +957,18 @@ export function App() {
         {active?.connected && (
           <>
             <span>·</span>
+            <span
+              className={`mono${tabs.activeTab?.tx ? " status-tx--active" : ""}`}
+              title={otherTxCount > 0 ? `${otherTxCount} other tab${otherTxCount === 1 ? "" : "s"} on this connection hold an open transaction` : undefined}
+            >
+              tx: {tabs.activeTab?.tx ? `active ${activeTxElapsed}` : "none"}
+              {otherTxCount > 0 && ` · +${otherTxCount} tab${otherTxCount === 1 ? "" : "s"}`}
+            </span>
+          </>
+        )}
+        {active?.connected && (
+          <>
+            <span>·</span>
             <button
               className="status-sens-button"
               title="Review classifications (PHI / PCI / PII)"
@@ -884,6 +1012,24 @@ export function App() {
           </span>
         </span>
       </div>
+
+      {txConfirm && (
+        <Modal onClose={() => settleTx(false)} className="review-modal tx-confirm">
+          <div className="review-head">
+            <span className="review-title">{txConfirm.title}</span>
+          </div>
+          <div className="tx-confirm-body">{txConfirm.body}</div>
+          <div className="review-foot">
+            <div className="spacer" />
+            <button className="editor-btn ghost" onClick={() => settleTx(false)} autoFocus>
+              Cancel
+            </button>
+            <button className="editor-btn primary-destruct" onClick={() => settleTx(true)}>
+              {txConfirm.action}
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {showAdd && (
         <AddConnectionModal

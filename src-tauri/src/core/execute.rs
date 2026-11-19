@@ -173,7 +173,7 @@ async fn run_with_gate(
 
     // 6. Run the (possibly-modified) SQL. `reveal=false` — the MCP path
     //    never reveals sensitive data; see design/redaction.md §"MCP scope".
-    run_decoded(core, conn, &final_sql, /* reveal */ false, read_only).await
+    run_decoded(core, conn, &final_sql, /* reveal */ false, read_only, None).await
 }
 
 /// Run `EXPLAIN (FORMAT JSON) <sql>` and pull the planner's estimate of the
@@ -562,7 +562,7 @@ fn stmt_kind_str(k: StmtKind) -> &'static str {
 //   Start the DB with `dev/db.sh up`.
 // ─────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::activity::EmitFn;
     use crate::connections;
@@ -570,7 +570,10 @@ mod tests {
     use crate::core::policy;
     use crate::core::Core;
     use crate::pool::PoolRegistry;
-    use crate::core::{classify_schema, update_classification};
+    use crate::core::{
+        classify_schema, link_sensitivity_file, sensitivity_file_status, unlink_sensitivity_file,
+        update_classification,
+    };
     use crate::types::{
         ActivityEvent, Category, Classification, ClassificationAction, ClassificationStatus,
         NewConnectionInput, QueryResult,
@@ -581,7 +584,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-    const TEST_CONN: &str = "testdb";
+    pub(in crate::core) const TEST_CONN: &str = "testdb";
 
     fn test_db_url() -> String {
         std::env::var("TEST_DATABASE_URL")
@@ -590,18 +593,20 @@ mod tests {
 
     /// A `Core` wired to the live test DB, plus the captured activity stream
     /// and a private throwaway schema for the test to mutate.
-    struct Harness {
-        core: Core,
+    pub(in crate::core) struct Harness {
+        pub(in crate::core) core: Core,
+        /// The UI core sharing `core`'s pools — the editor's caller.
+        pub(in crate::core) human: Core,
         events: UnboundedReceiver<ActivityEvent>,
-        pool: PgPool,
-        schema: String,
+        pub(in crate::core) pool: PgPool,
+        pub(in crate::core) schema: String,
     }
 
     /// Build a [`Harness`], or return `None` (and print a skip notice) when the
     /// test DB is unreachable. The Postgres pool is injected directly into the
     /// registry, so no secret-store or real connection record is needed; the
     /// in-memory metadata DB just carries the `testdb` row `run_decoded` reads.
-    async fn setup() -> Option<Harness> {
+    pub(in crate::core) async fn setup() -> Option<Harness> {
         let pool = match PgPoolOptions::new()
             .max_connections(4)
             .acquire_timeout(Duration::from_secs(3))
@@ -644,7 +649,7 @@ mod tests {
         });
 
         // The agent core mirrors the production caller of the gated runner.
-        let (_human, agent) = Core::ui_with_agent(meta, pools, emit);
+        let (human, agent) = Core::ui_with_agent(meta, pools, emit);
 
         let schema = format!("it_{}", uuid::Uuid::new_v4().simple());
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
@@ -654,6 +659,7 @@ mod tests {
 
         Some(Harness {
             core: agent,
+            human,
             events: rx,
             pool,
             schema,
@@ -661,7 +667,7 @@ mod tests {
     }
 
     impl Harness {
-        async fn drop_schema(&self) {
+        pub(in crate::core) async fn drop_schema(&self) {
             let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema))
                 .execute(&self.pool)
                 .await;
@@ -1509,6 +1515,160 @@ mod tests {
         let c = classification(&h, "persons", "born").await.unwrap();
         assert_eq!(c.status, ClassificationStatus::Confirmed);
         assert!(classification(&h, "people", "d1").await.is_none());
+        h.drop_schema().await;
+    }
+
+    // ── Shared sensitivity file ──────────────────────────────────────────
+    //
+    // A second connection to the same database stands in for another
+    // environment. See design/shared-sensitivity-file.md.
+
+    const OTHER_CONN: &str = "otherenv";
+
+    async fn add_other_connection(h: &Harness) {
+        connections::insert(
+            &h.core.meta,
+            &NewConnectionInput {
+                name: OTHER_CONN.into(),
+                host: "localhost".into(),
+                port: 0,
+                database: "workbench".into(),
+                username: "workbench".into(),
+                password: String::new(),
+                ssl_mode: "disable".into(),
+            },
+        )
+        .await
+        .unwrap();
+        h.core.pools.insert_for_test(OTHER_CONN, h.pool.clone(), true).await;
+    }
+
+    async fn status_of(h: &Harness, conn: &str, table: &str, column: &str) -> Option<ClassificationStatus> {
+        let conn_id = connections::get(&h.core.meta, conn).await.unwrap().id;
+        connections::list_classifications(&h.core.meta, &conn_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.schema == h.schema && c.table == table && c.column == column)
+            .map(|c| c.status)
+    }
+
+    fn temp_file_path() -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("clio-it-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clio-pii.json");
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn shared_file_carries_reviews_to_another_connection() {
+        let Some(h) = setup().await else { return };
+        let s = h.schema.clone();
+        raw(
+            &h,
+            &format!(
+                "CREATE TABLE {s}.leads (id int, notes text, status text, score bigint); \
+                 INSERT INTO {s}.leads VALUES (1, 'met at the clinic', 'open', 42);"
+            ),
+        )
+        .await;
+        let (dir, path) = temp_file_path();
+        let p = path.to_str().unwrap();
+        let mark = |conn: &'static str, column: &'static str, action: ClassificationAction| {
+            let core = h.core.clone();
+            let s = s.clone();
+            async move { update_classification(&core, conn, &s, "leads", column, action).await.unwrap() }
+        };
+
+        // Review in the first environment, then link: the review lands in the
+        // new file.
+        classify_schema(&h.core, TEST_CONN).await.unwrap();
+        mark(TEST_CONN, "status", ClassificationAction::MarkSafe).await;
+        assert_eq!(link_sensitivity_file(&h.core, TEST_CONN, p).await.unwrap(), 1);
+        // Linked: later reviews write through.
+        mark(TEST_CONN, "notes", ClassificationAction::Confirm).await;
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""status": { "status": "safe", "type": "text" }"#), "{text}");
+        assert!(text.contains(r#""notes": { "status": "redact", "category": "pii" }"#), "{text}");
+
+        // A fresh environment: the scan redacts every text column, then the
+        // file confirms `notes`. `status` waits for a human.
+        add_other_connection(&h).await;
+        classify_schema(&h.core, OTHER_CONN).await.unwrap();
+        assert_eq!(status_of(&h, OTHER_CONN, "leads", "notes").await, Some(ClassificationStatus::Pending));
+        assert_eq!(link_sensitivity_file(&h.core, OTHER_CONN, p).await.unwrap(), 0);
+        assert_eq!(status_of(&h, OTHER_CONN, "leads", "notes").await, Some(ClassificationStatus::Confirmed));
+        let outcome = classify_schema(&h.core, OTHER_CONN).await.unwrap();
+        assert_eq!(outcome.shared_safe_waiting, 1);
+        let waiting = sensitivity_file_status(&h.core, OTHER_CONN).await.unwrap().unwrap().waiting;
+        let waiting: Vec<(&str, &str)> =
+            waiting.iter().map(|w| (w.table.as_str(), w.column.as_str())).collect();
+        assert_eq!(waiting, vec![("leads", "status")]);
+
+        let read = format!("SELECT notes, status, score FROM {s}.leads");
+        let other_read = || {
+            let core = h.core.clone();
+            let read = read.clone();
+            async move { execute_statement(&core, OTHER_CONN, &read, None).await.unwrap() }
+        };
+        let r = other_read().await;
+        assert!(r.columns[0].redacted && r.columns[1].redacted, "safe in the file isn't safe here yet");
+        assert!(!r.columns[2].redacted);
+
+        // Accepting it makes it visible.
+        mark(OTHER_CONN, "status", ClassificationAction::MarkSafe).await;
+        let r = other_read().await;
+        assert!(!r.columns[1].redacted);
+        assert_eq!(r.rows[0][1].as_deref(), Some("open"));
+        assert!(sensitivity_file_status(&h.core, OTHER_CONN).await.unwrap().unwrap().waiting.is_empty());
+
+        // A redaction confirmed in the first environment reaches the other's
+        // agent before its next query, with no reconnect.
+        mark(TEST_CONN, "score", ClassificationAction::AddManual { category: Category::Pci }).await;
+        let r = other_read().await;
+        assert!(r.columns[2].redacted, "the file changed, so the agent path rescans");
+
+        // So does one written to the file by hand (a teammate's commit).
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(r#""status": { "status": "safe", "type": "text" }"#, r#""status": { "status": "redact", "category": "pii" }"#);
+        std::fs::write(&path, edited).unwrap();
+        let r = other_read().await;
+        assert!(r.columns[1].redacted, "a redaction in the file wins over a local safe");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        h.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn unreadable_shared_file_refuses_agents_and_changes_nothing() {
+        let Some(h) = setup().await else { return };
+        let s = h.schema.clone();
+        raw(&h, &format!("CREATE TABLE {s}.leads (id int, notes text); INSERT INTO {s}.leads VALUES (1, 'x');")).await;
+        let (dir, path) = temp_file_path();
+        link_sensitivity_file(&h.core, TEST_CONN, path.to_str().unwrap()).await.unwrap();
+        let read = format!("SELECT notes FROM {s}.leads");
+        agent_read(&h, &read).await;
+
+        // A merge conflict, say.
+        std::fs::write(&path, "<<<<<<< HEAD\n{}").unwrap();
+        let e = execute_statement(&h.core, TEST_CONN, &read, None).await.unwrap_err();
+        assert!(format!("{e:#}").contains("shared sensitivity file"), "{e:#}");
+        assert!(classify_schema(&h.core, TEST_CONN).await.is_err());
+        let st = sensitivity_file_status(&h.core, TEST_CONN).await.unwrap().unwrap();
+        assert!(st.error.is_some());
+
+        // Write-back goes first, so a failed write leaves the review as it was.
+        let r = update_classification(&h.core, TEST_CONN, &s, "leads", "notes", ClassificationAction::MarkSafe).await;
+        assert!(r.is_err());
+        assert_eq!(status_of(&h, TEST_CONN, "leads", "notes").await, Some(ClassificationStatus::Pending));
+
+        // Unlinked, agents get the connection back; the file is untouched.
+        unlink_sensitivity_file(&h.core, TEST_CONN).await.unwrap();
+        assert!(agent_read(&h, &read).await.columns[0].redacted);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "<<<<<<< HEAD\n{}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
         h.drop_schema().await;
     }
 }
