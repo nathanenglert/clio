@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/nathanenglert/clio/compare/v0.4.0...v0.5.0) (2026-11-19)
+
+
+### Features
+
+* **editor:** run multi-statement scripts with tab-pinned transactions ([#50](https://github.com/nathanenglert/clio/issues/50)) ([76452ac](https://github.com/nathanenglert/clio/commit/76452acf7ea7b5bdf5dfc2f1c0444a4e953eee2a))
+
 ## [0.4.0](https://github.com/nathanenglert/clio/compare/v0.3.0...v0.4.0) (2026-11-06)
 
 
