@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Connection, type QueryResult } from "../lib/api";
+import { type Connection } from "../lib/api";
 import { Splitter } from "./Splitter";
 import { TabBar } from "./TabBar";
 import { SqlEditor, type SqlEditorHandle } from "./SqlEditor";
@@ -7,6 +7,9 @@ import { ExportMenu } from "./ExportMenu";
 import { ResultsGrid } from "./ResultsGrid";
 import { JsonSidebar, type JsonSidebarTarget } from "./JsonSidebar";
 import { TableStructure } from "./TableStructure";
+import { RunMessages, formatMs, resultCountLabel } from "./RunMessages";
+import { TransactionChip } from "./TransactionChip";
+import { splitStatements, statementAt } from "../lib/sqlStatements";
 import { useResizable } from "../lib/useResizable";
 import { getEdit } from "../lib/editing";
 import { Lunate, Glyph } from "./brand";
@@ -17,25 +20,9 @@ import type { Snippets } from "../lib/useSnippets";
 
 type TabMode = "data" | "structure";
 
-const WRITE_VERBS: Record<string, string> = {
-  insert: "inserted",
-  update: "updated",
-  delete: "deleted",
-  merge: "merged",
-};
-
-/** Footer count. A write returns no rows (unless RETURNING), so for one we
- *  report how many rows it touched — "3 rows updated", not "0 rows". */
-function resultCountLabel(result: QueryResult, sql: string): string {
-  const firstWord = sql
-    .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, " ")
-    .trim()
-    .split(/\s+/)[0]
-    ?.toLowerCase();
-  const verb = firstWord ? WRITE_VERBS[firstWord] : undefined;
-  const n = verb && result.rows_affected != null ? result.rows_affected : result.row_count;
-  return `${n} row${n === 1 ? "" : "s"}${verb && result.rows_affected != null ? ` ${verb}` : ""}`;
-}
+/** What a run executes: `text` (one or more statements) at `offset` in the
+ *  tab's SQL, so failures map back to editor positions. */
+export type RunTarget = { text: string; offset: number };
 
 type Props = {
   active: Connection | null;
@@ -48,7 +35,12 @@ type Props = {
   onCloseTab: (id: string) => void;
   onAddTab: () => void;
   onSqlChange: (id: string, sql: string) => void;
-  onRun: (sqlOverride?: string) => void;
+  /** Run `target`, or the whole tab when omitted. */
+  onRun: (target?: RunTarget) => void;
+  /** Commit (true) or roll back the active tab's open transaction. */
+  onEndTransaction: (commit: boolean) => void;
+  /** Switch the active tab's result area between grid and messages. */
+  onResultView: (view: "results" | "messages") => void;
   /** ⌘S — write-through for library tabs, else opens the save sheet. */
   onSave: () => void;
   /** ⌘⇧S — always opens the save sheet as a fresh entry. */
@@ -79,6 +71,8 @@ export function Workspace({
   onAddTab,
   onSqlChange,
   onRun,
+  onEndTransaction,
+  onResultView,
   onSave,
   onSaveAs,
   onOpenMcpModal,
@@ -101,15 +95,23 @@ export function Workspace({
     axis: "y",
   });
 
-  // Selection-aware run: if the editor has highlighted text, run only that;
-  // otherwise fall through to the active tab's full SQL. The current statement
-  // is intentionally not isolated yet (multi-statement intent is unclear
-  // without a real parser) — selection covers the explicit "I just want this
-  // bit" case the task targets.
+  // ⌘↵: the selection if there is one, else the statement at the cursor (the
+  // editor marks it), else — a lone statement — the whole tab.
   const handleRun = useCallback(() => {
-    const sel = editorRef.current?.getSelection() ?? "";
-    if (sel.trim().length > 0) onRun(sel);
-    else onRun();
+    const ed = editorRef.current;
+    if (!ed) return onRun();
+    const text = ed.getText();
+    const { from, to } = ed.getSelectionRange();
+    if (text.slice(from, to).trim()) return onRun({ text: text.slice(from, to), offset: from });
+    const stmts = splitStatements(text);
+    const s = stmts.length > 1 ? statementAt(text, stmts, ed.getCursor()) : null;
+    onRun(s ? { text: s.sql, offset: s.from } : { text, offset: 0 });
+  }, [onRun]);
+
+  // ⌘⇧↵: every statement in the tab, in order.
+  const handleRunAll = useCallback(() => {
+    const text = editorRef.current?.getText();
+    onRun(text == null ? undefined : { text, offset: 0 });
   }, [onRun]);
 
   // ⌘E opens the Export menu when results are loaded.
@@ -170,6 +172,20 @@ export function Workspace({
   const result = activeTab?.result ?? null;
   const error = activeTab?.error ?? null;
   const running = activeTab?.running ?? false;
+  const stmtCount = useMemo(() => splitStatements(activeTab?.sql ?? "").length, [activeTab?.sql]);
+  const run = activeTab?.lastRun ?? null;
+  const multi = (run?.statements.length ?? 0) > 1;
+  const noticeCount = run ? run.script.steps.reduce((n, s) => n + s.notices.length, 0) : 0;
+  const hasMessages =
+    !!run &&
+    (multi || noticeCount > 0 || !!run.script.error || run.script.steps.some((st) => st.rolled_back));
+  const view = hasMessages ? activeTab?.resultView ?? "results" : "results";
+  const failedIdx = run ? run.script.steps.findIndex((s) => s.error) : -1;
+  // The statement behind the grid — what the footer counts, echoes and exports.
+  const resultSql =
+    run && run.script.result_step != null
+      ? run.statements[run.script.result_step].sql
+      : activeTab?.sql ?? "";
   const isAgentTab = activeTab?.agentAuthored ?? false;
   const columnsMeta = isTableTab && schema && table ? editing.getMeta(schema, table) : null;
   const batch = activeTab ? editing.getBatch(activeTab.id) : { edits: [], adds: [], deletes: [] };
@@ -306,11 +322,24 @@ export function Workspace({
               onClick={handleRun}
               disabled={running || !active.connected || !activeTab}
               aria-label="Run query"
+              title={stmtCount > 1 ? "Run the marked statement, or the selection" : undefined}
             >
               <span className="run-icon" aria-hidden>▶</span>
               <span>{running ? "Running…" : "Run"}</span>
               <kbd className="kbd">⌘↵</kbd>
             </button>
+            {stmtCount > 1 && (
+              <button
+                className="editor-btn"
+                onClick={handleRunAll}
+                disabled={running || !active.connected || !activeTab}
+                title="Run every statement in the tab, in order — stops at the first error"
+              >
+                <span className="editor-btn-icon" aria-hidden>▶▶</span>
+                Run all
+                <kbd className="kbd">⌘⇧↵</kbd>
+              </button>
+            )}
             <button className="editor-btn soon" disabled title="Format SQL — coming soon">
               Format
             </button>
@@ -332,6 +361,14 @@ export function Workspace({
           </>
         )}
         <div className="spacer" />
+        {activeTab?.tx && (
+          <TransactionChip
+            openedAtMs={activeTab.tx.openedAtMs}
+            busy={running}
+            onCommit={() => onEndTransaction(true)}
+            onRollback={() => onEndTransaction(false)}
+          />
+        )}
         {isAgentTab && !showStructure && (
           <span className="agent-badge">
             <span className="agent-dot" />
@@ -363,6 +400,8 @@ export function Workspace({
             value={activeTab.sql}
             onChange={(v) => onSqlChange(activeTab.id, v)}
             onRun={handleRun}
+            onRunAll={handleRunAll}
+            errorRange={run && failedIdx >= 0 ? run.statements[failedIdx] : null}
             onSave={onSave}
             onSaveAs={onSaveAs}
             schema={intellisense.schema}
@@ -385,15 +424,35 @@ export function Workspace({
       />
 
       <div className="result-toolbar">
-        {result ? (
+        {multi && run ? (
+          <>
+            <span className={`status-pill ${run.script.error || failedIdx >= 0 ? "err" : "ok"} mono`}>
+              {run.script.error
+                ? "run failed"
+                : failedIdx >= 0
+                ? `failed at statement ${failedIdx + 1} of ${run.statements.length}`
+                : `${run.statements.length} statements`}
+              {" · "}
+              {formatMs(run.script.elapsed_ms)}
+            </span>
+            {result && view === "results" && (
+              <>
+                <span className="result-sep">│</span>
+                <span className="result-sql mono" title={resultSql}>
+                  {resultCountLabel(result, resultSql)} · {resultSql.replace(/\s+/g, " ").trim().slice(0, 120)}
+                </span>
+              </>
+            )}
+          </>
+        ) : result ? (
           <>
             <span className="status-pill ok mono">
-              {resultCountLabel(result, activeTab?.sql ?? "")} · {result.elapsed_ms}ms
+              {resultCountLabel(result, resultSql)} · {result.elapsed_ms}ms
               {result.truncated && " · truncated"}
             </span>
             <span className="result-sep">│</span>
-            <span className="result-sql mono" title={activeTab?.sql ?? ""}>
-              {(activeTab?.sql ?? "").replace(/\s+/g, " ").trim().slice(0, 120)}
+            <span className="result-sql mono" title={resultSql}>
+              {resultSql.replace(/\s+/g, " ").trim().slice(0, 120)}
             </span>
           </>
         ) : error ? (
@@ -406,6 +465,26 @@ export function Workspace({
           <span className="result-empty mono">
             No results yet. ⌘↵ to run.
           </span>
+        )}
+        {hasMessages && (
+          <div className="ws-mode-seg result-view-seg" role="tablist" aria-label="Result view">
+            <button
+              role="tab"
+              aria-selected={view === "results"}
+              className={view === "results" ? "on" : ""}
+              onClick={() => onResultView("results")}
+            >
+              Results
+            </button>
+            <button
+              role="tab"
+              aria-selected={view === "messages"}
+              className={view === "messages" ? "on" : ""}
+              onClick={() => onResultView("messages")}
+            >
+              Messages{noticeCount > 0 ? ` · ${noticeCount}` : ""}
+            </button>
+          </div>
         )}
         <div className="spacer" />
         <button className="editor-btn soon" disabled title="Filter — coming soon">
@@ -424,7 +503,7 @@ export function Workspace({
         )}
         <ExportMenu
           result={result}
-          sql={activeTab?.sql ?? ""}
+          sql={resultSql}
           tabTitle={activeTab?.title ?? "query"}
           connectionName={active.name}
           openSignal={exportOpenSignal}
@@ -440,10 +519,13 @@ export function Workspace({
       </div>
 
       <div className="results-region">
+        {view === "messages" && run ? (
+          <RunMessages run={run} onReveal={(stmt) => editorRef.current?.reveal(stmt.from)} />
+        ) : (
         <ResultsGrid
           result={result}
           error={error}
-          countLabel={result ? resultCountLabel(result, activeTab?.sql ?? "") : undefined}
+          countLabel={result ? resultCountLabel(result, resultSql) : undefined}
           editable={editable}
           readOnlyReason={
             !active.connected
@@ -468,7 +550,8 @@ export function Workspace({
           }
           onStartAdd={() => editableTab && editing.startAdd(editableTab)}
         />
-        {jsonTarget && (
+        )}
+        {jsonTarget && view === "results" && (
           <JsonSidebar
             target={jsonTarget}
             editable={editable}

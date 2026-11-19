@@ -948,6 +948,14 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
   box-shadow: 0 0 0 2px var(--bg-app);
 }
 .tab.agent .tab-dirty { background: var(--agent); }
+/* An open transaction: gold ring, so it reads apart from the dirty dot. */
+.tab-tx {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1.5px solid var(--op-write);
+  flex: 0 0 auto;
+}
 
 .tab-close {
   background: transparent;
@@ -1053,6 +1061,16 @@ input:disabled, textarea:disabled { cursor: not-allowed; }
 .editor-btn.primary-write:hover:not(:disabled) {
   background: rgba(212, 161, 85, 0.14);
   border-color: rgba(212, 161, 85, 0.7);
+}
+.editor-btn.primary-destruct {
+  color: var(--op-destruct);
+  border: 1px solid rgba(217, 108, 84, 0.45);
+  background: rgba(217, 108, 84, 0.08);
+  padding: 4px 10px;
+}
+.editor-btn.primary-destruct:hover:not(:disabled) {
+  background: rgba(217, 108, 84, 0.14);
+  border-color: rgba(217, 108, 84, 0.7);
 }
 
 .kbd {
@@ -3434,4 +3452,127 @@ body.dragging-y * { cursor: inherit !important; }
 .ws-mode-seg button.on {
   background: var(--bg-elevated-2);
   color: var(--text-primary);
+}
+
+/* ── Script runs ──────────────────────────────────────────────────── */
+
+/* Pill and toggle keep their size; the echoed SQL is what gives way. */
+.result-toolbar .status-pill { flex: 0 0 auto; white-space: nowrap; }
+.result-toolbar .result-sql { flex: 0 1 auto; min-width: 0; }
+.result-view-seg { margin-left: 8px; flex: 0 0 auto; }
+.result-view-seg button { white-space: nowrap; }
+
+.run-messages {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 0;
+  font-size: 11.5px;
+}
+.run-msg-error {
+  margin: 4px 14px 8px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--op-destruct);
+  background: rgba(217, 108, 84, 0.06);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  font-size: 11.5px;
+}
+.run-step { padding: 0 0 2px; }
+.run-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 4px 14px;
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.run-step-head:hover { background: var(--bg-elevated); }
+.run-step-glyph { width: 10px; flex: 0 0 auto; }
+.run-step--ok .run-step-glyph { color: var(--op-read); }
+.run-step--err .run-step-glyph { color: var(--op-destruct); }
+.run-step--skipped .run-step-head { color: var(--text-faint); }
+.run-step-n { color: var(--text-faint); flex: 0 0 auto; }
+.run-step-sql {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.run-step--skipped .run-step-sql { color: var(--text-faint); }
+.run-step-outcome { flex: 0 0 auto; color: var(--text-secondary); }
+.run-step--err .run-step-outcome { color: var(--op-destruct); }
+.run-step-ms {
+  flex: 0 0 64px;
+  text-align: right;
+  color: var(--text-faint);
+}
+.run-notice,
+.run-step-error,
+.run-step-undo {
+  margin: 2px 14px 4px 54px;
+}
+.run-notice {
+  display: flex;
+  gap: 8px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+}
+.run-notice-sev {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.run-notice--warning .run-notice-sev { color: var(--op-write); }
+.run-step-error {
+  padding: 6px 10px;
+  border-left: 2px solid var(--op-destruct);
+  background: rgba(217, 108, 84, 0.06);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  font-size: 11.5px;
+}
+.run-step-undo {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+
+/* The tab's open transaction, in the editor toolbar. */
+.tx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 4px 0 10px;
+  margin-right: 8px;
+  border: 1px solid rgba(212, 161, 85, 0.35);
+  background: var(--op-write-soft);
+  border-radius: 5px;
+  font-size: var(--fs-sm);
+  color: var(--op-write);
+}
+.tx-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--op-write);
+}
+.tx-chip-label { font-weight: 600; }
+.tx-chip-time { color: var(--text-secondary); font-size: 11px; }
+.tx-chip-btn { height: 20px; padding: 0 8px; font-size: 11px; }
+.status-tx--active { color: var(--op-write); }
+
+.tx-confirm { width: min(460px, 90vw); }
+.tx-confirm-body {
+  padding: 14px 16px;
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  color: var(--text-secondary);
 }

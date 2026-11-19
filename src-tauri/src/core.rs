@@ -16,6 +16,7 @@ mod query;
 pub(crate) mod redactor;
 mod saved_queries;
 mod schema;
+mod script;
 mod sensitivity;
 mod sensitivity_file;
 mod snippets;
@@ -27,9 +28,10 @@ pub use lifecycle::{
     request_connect,
 };
 pub use mutations::apply_mutations;
-pub use query::{run_query, run_sql};
+pub use query::run_query;
 pub use saved_queries::{delete_saved_query, list_saved_queries, upsert_saved_query};
 pub use schema::{describe_table, list_schemas, list_tables, search_columns};
+pub use script::{end_transaction, run_script, NoticeLayer};
 pub use sensitivity::{
     classify_schema, link_sensitivity_file, list_classifications, sensitivity_file_status,
     unlink_sensitivity_file, update_classification,
@@ -38,6 +40,7 @@ pub use snippets::{delete_snippet, list_snippets, upsert_snippet};
 
 use permission::{PendingConnects, PendingMigrations, PendingPermissions};
 use redactor::RedactorCache;
+use script::Sessions;
 use sensitivity::ScanIndex;
 
 /// Container the UI- and MCP-mode entry points both hand to core fns.
@@ -72,6 +75,8 @@ pub struct Core {
     /// What each connection's last sensitivity scan saw; lets the agent path
     /// rescan when its SQL names a relation that changed since.
     pub(crate) scans: ScanIndex,
+    /// Editor tabs' open transactions, each on its own pinned connection.
+    pub(crate) sessions: Sessions,
 }
 
 impl Core {
@@ -87,6 +92,7 @@ impl Core {
         let pending_connects = PendingConnects::default();
         let redactor_cache = RedactorCache::default();
         let scans = ScanIndex::default();
+        let sessions = Sessions::default();
         let human = Core {
             meta: meta.clone(),
             pools: pools.clone(),
@@ -99,6 +105,7 @@ impl Core {
             pending_migrations: pending_migrations.clone(),
             pending_connects: pending_connects.clone(),
             scans: scans.clone(),
+            sessions: sessions.clone(),
         };
         let agent = Core {
             meta,
@@ -112,6 +119,7 @@ impl Core {
             pending_migrations,
             pending_connects,
             scans,
+            sessions,
         };
         (human, agent)
     }

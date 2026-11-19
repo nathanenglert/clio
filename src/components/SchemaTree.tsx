@@ -41,6 +41,9 @@ type Props = {
   /** Fired around api.connect so App can drive the "Opening the record…"
    *  hero. Start with the in-flight Connection, end with null. */
   onConnectingChange?: (conn: Connection | null) => void;
+  /** Asked before disconnecting the active connection; false cancels (e.g.
+   *  the human keeps a tab's open transaction). */
+  confirmDisconnect?: (name: string) => Promise<boolean>;
 };
 
 const DELETE_CONFIRM_TIMEOUT_MS = 3000;
@@ -142,6 +145,7 @@ export function SchemaTree({
   onRunLibrary,
   onDeleteLibrary,
   onConnectingChange,
+  confirmDisconnect,
 }: Props) {
   const connection = connections.find((c) => c.name === activeName) ?? null;
   const connectionName = connection && connection.connected ? connection.name : null;
@@ -249,6 +253,7 @@ export function SchemaTree({
     try {
       const wasActive = c.name === activeName;
       if (wasActive && c.connected) {
+        if (confirmDisconnect && !(await confirmDisconnect(c.name))) return;
         await api.disconnect(c.name);
       } else {
         if (!c.connected) {

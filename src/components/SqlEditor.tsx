@@ -8,7 +8,15 @@ import CodeMirror, {
 import { PostgreSQL, keywordCompletionSource, schemaCompletionSource } from "@codemirror/lang-sql";
 import { HighlightStyle, LanguageSupport, syntaxHighlighting } from "@codemirror/language";
 import { undo, redo } from "@codemirror/commands";
-import { Compartment, Prec } from "@codemirror/state";
+import {
+  Compartment,
+  Prec,
+  RangeSetBuilder,
+  StateEffect,
+  StateField,
+  type EditorState,
+} from "@codemirror/state";
+import { Decoration, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import {
   acceptCompletion,
   autocompletion,
@@ -19,11 +27,16 @@ import {
 } from "@codemirror/autocomplete";
 import { tags as t } from "@lezer/highlight";
 import type { IntellisenseSchema } from "../lib/useIntellisense";
+import { splitStatements, statementAt, type Stmt } from "../lib/sqlStatements";
 
 type Props = {
   value: string;
   onChange: (v: string) => void;
   onRun?: () => void;
+  /** ⌘⇧↵ — run every statement in the tab. */
+  onRunAll?: () => void;
+  /** The statement the last run failed on, marked until the next run. */
+  errorRange?: { from: number; to: number } | null;
   /** ⌘S — write-through for library tabs, else opens the save sheet. */
   onSave?: () => void;
   /** ⌘⇧S — always opens the save sheet as a fresh entry. */
@@ -46,6 +59,11 @@ type Props = {
 export type SqlEditorHandle = {
   /** Returns the currently selected text, or an empty string when none. */
   getSelection: () => string;
+  getSelectionRange: () => { from: number; to: number };
+  getText: () => string;
+  getCursor: () => number;
+  /** Put the cursor at `pos`, scroll it into view, and focus. */
+  reveal: (pos: number) => void;
   focus: () => void;
 };
 
@@ -92,6 +110,15 @@ const theme = EditorView.theme(
       backgroundColor: "rgba(212, 145, 90, 0.18)",
     },
     ".cm-cursor": { borderLeftColor: "var(--text-primary)" },
+    // The statement ⌘↵ will run, and the one the last run failed on.
+    ".cm-line.cm-stmt-current": {
+      boxShadow: "inset 2px 0 0 var(--line-strong)",
+      backgroundColor: "rgba(255, 240, 220, 0.018)",
+    },
+    ".cm-line.cm-stmt-error": {
+      boxShadow: "inset 2px 0 0 var(--op-destruct)",
+      backgroundColor: "rgba(217, 108, 84, 0.07)",
+    },
     // Completion popup — match the dark workbench surface.
     ".cm-tooltip.cm-tooltip-autocomplete": {
       backgroundColor: "var(--bg-panel, #1f1c18)",
@@ -173,10 +200,73 @@ function parseAliases(sql: string): Map<string, AliasTarget> {
 
 const EMPTY_SNIPPETS: readonly Completion[] = [];
 
+const currentLine = Decoration.line({ class: "cm-stmt-current" });
+const errorLine = Decoration.line({ class: "cm-stmt-error" });
+
+/** A line decoration on every line from `from` to `to`. */
+function markLines(state: EditorState, from: number, to: number, deco: Decoration): DecorationSet {
+  const b = new RangeSetBuilder<Decoration>();
+  const end = Math.min(to, state.doc.length);
+  for (let pos = Math.min(from, end); pos <= end; ) {
+    const line = state.doc.lineAt(pos);
+    b.add(line.from, line.from, deco);
+    pos = line.to + 1;
+  }
+  return b.finish();
+}
+
+/** Marks the statement ⌘↵ will run when the tab holds several — not for a
+ *  lone statement, nor while a selection overrides it. */
+const currentStatement = ViewPlugin.fromClass(
+  class {
+    text: string;
+    stmts: Stmt[];
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.text = view.state.doc.toString();
+      this.stmts = splitStatements(this.text);
+      this.decorations = this.build(view.state);
+    }
+    update(u: ViewUpdate) {
+      if (u.docChanged) {
+        this.text = u.state.doc.toString();
+        this.stmts = splitStatements(this.text);
+      }
+      if (u.docChanged || u.selectionSet) this.decorations = this.build(u.state);
+    }
+    build(state: EditorState): DecorationSet {
+      const sel = state.selection.main;
+      if (!sel.empty || this.stmts.length < 2) return Decoration.none;
+      const s = statementAt(this.text, this.stmts, sel.head);
+      return s ? markLines(state, s.from, s.to, currentLine) : Decoration.none;
+    }
+  },
+  { decorations: (v) => v.decorations },
+);
+
+const setErrorRange = StateEffect.define<{ from: number; to: number } | null>();
+
+/** The failed statement's mark; follows edits until the next run replaces it. */
+const errorStatement = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    deco = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setErrorRange)) {
+        deco = e.value ? markLines(tr.state, e.value.from, e.value.to, errorLine) : Decoration.none;
+      }
+    }
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 export function SqlEditor({
   value,
   onChange,
   onRun,
+  onRunAll,
+  errorRange,
   onSave,
   onSaveAs,
   readOnly,
@@ -222,6 +312,8 @@ export function SqlEditor({
     return [
       sqlCompartment.of(buildSqlExtension(schema, defaultSchema)),
       syntaxHighlighting(highlight),
+      currentStatement,
+      errorStatement,
       autocompletion({
         override: undefined, // keep the SQL source; we add ours alongside
         activateOnTyping: true,
@@ -293,20 +385,37 @@ export function SqlEditor({
       // otherwise acceptCompletion returns false and Tab falls through to
       // the default indent behavior. Boosted to outrun basicSetup's Tab.
       Prec.high(keymap.of([{ key: "Tab", run: acceptCompletion }])),
-      ...(onRun
-        ? [
-            keymap.of([
-              {
-                key: "Mod-Enter",
-                preventDefault: true,
-                run: () => {
-                  onRun();
-                  return true;
+      // Run keys outrank basicSetup's keymap, which binds Mod-Enter to
+      // insertBlankLine and would otherwise swallow ⌘↵. Mod-Shift-Enter
+      // first, like Mod-Shift-s below.
+      Prec.high(
+        keymap.of([
+          ...(onRunAll
+            ? [
+                {
+                  key: "Mod-Shift-Enter",
+                  preventDefault: true,
+                  run: () => {
+                    onRunAll();
+                    return true;
+                  },
                 },
-              },
-            ]),
-          ]
-        : []),
+              ]
+            : []),
+          ...(onRun
+            ? [
+                {
+                  key: "Mod-Enter",
+                  preventDefault: true,
+                  run: () => {
+                    onRun();
+                    return true;
+                  },
+                },
+              ]
+            : []),
+        ]),
+      ),
       // Mod-Shift-s must be registered before Mod-s so CodeMirror's keymap
       // dispatch matches the more specific binding first.
       ...(onSaveAs
@@ -342,7 +451,7 @@ export function SqlEditor({
     // via the compartment reconfigure effects below so the extension list
     // stays stable across re-renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onRun, onSave, onSaveAs, sqlCompartment, snippetCompartment, onEnsureColumns]);
+  }, [onRun, onRunAll, onSave, onSaveAs, sqlCompartment, snippetCompartment, onEnsureColumns]);
 
   // When the schema changes, reconfigure the SQL extension in place. This is
   // the load-bearing call for live intellisense: lazy describe_table results
@@ -355,6 +464,12 @@ export function SqlEditor({
       effects: sqlCompartment.reconfigure(buildSqlExtension(schema, defaultSchema)),
     });
   }, [schema, defaultSchema, sqlCompartment]);
+
+  // Mark the statement the last run failed on. `errorRange` is the run's own
+  // statement object, so this fires per run and per tab switch, not per render.
+  useEffect(() => {
+    ref.current?.view?.dispatch({ effects: setErrorRange.of(errorRange ?? null) });
+  }, [errorRange]);
 
   // Snippets can mutate while the editor is open (user adds/edits in modal).
   // Swap the snippet completion source without rebuilding the editor.
@@ -381,6 +496,22 @@ export function SqlEditor({
         if (!view) return "";
         const { from, to } = view.state.selection.main;
         return view.state.sliceDoc(from, to);
+      },
+      getSelectionRange: () => {
+        const sel = ref.current?.view?.state.selection.main;
+        return { from: sel?.from ?? 0, to: sel?.to ?? 0 };
+      },
+      getText: () => ref.current?.view?.state.doc.toString() ?? "",
+      getCursor: () => ref.current?.view?.state.selection.main.head ?? 0,
+      reveal: (pos) => {
+        const view = ref.current?.view;
+        if (!view) return;
+        const at = Math.min(pos, view.state.doc.length);
+        view.dispatch({
+          selection: { anchor: at },
+          effects: EditorView.scrollIntoView(at, { y: "center" }),
+        });
+        view.focus();
       },
       focus: () => ref.current?.view?.focus(),
     });

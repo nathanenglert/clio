@@ -130,6 +130,32 @@ export type QueryResult = {
   redaction_meta?: RedactionMeta;
 };
 
+/** One editor run: the statements a tab sent, in order. */
+export type ScriptResult = {
+  /** One per statement that ran; the run stops at the first failure, so a
+   *  shorter list than was sent means the rest were skipped. */
+  steps: ScriptStep[];
+  /** Rows from the last statement that returned columns, for the grid. */
+  result: QueryResult | null;
+  /** Index into `steps` of the statement `result` came from. */
+  result_step: number | null;
+  /** The tab's transaction, when one is still open after the run. */
+  transaction: { opened_at_ms: number } | null;
+  /** A failure not tied to one statement (no connection, lost transaction). */
+  error: string | null;
+  elapsed_ms: number;
+};
+
+export type ScriptStep = {
+  error: string | null;
+  rows_affected: number;
+  row_count: number;
+  elapsed_ms: number;
+  notices: { severity: string; message: string }[];
+  /** On a failed step: what its error undid. */
+  rolled_back: "transaction" | "run" | null;
+};
+
 export type ExportResult = {
   row_count: number;
   elapsed_ms: number;
@@ -442,8 +468,10 @@ export const api = {
       schema,
       table,
     }),
-  run_query: (connection: string, sql: string, reveal: boolean = false) =>
-    invoke<QueryResult>("run_query", { connection, sql, reveal }),
+  run_script: (connection: string, tab: string, statements: string[], reveal: boolean = false) =>
+    invoke<ScriptResult>("run_script", { connection, tab, statements, reveal }),
+  end_transaction: (tab: string, commit: boolean) =>
+    invoke<void>("end_transaction", { tab, commit }),
   apply_mutations: (connection: string, batch: MutationBatch) =>
     invoke<MutationOutcome>("apply_mutations", { connection, batch }),
   export_query: (

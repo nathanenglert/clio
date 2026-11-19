@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { QueryResult } from "./api";
+import type { QueryResult, ScriptResult } from "./api";
+import type { Stmt } from "./sqlStatements";
 
 export type TabSource = "scratch" | "table" | "agent" | "library";
 
@@ -18,7 +19,15 @@ export type Tab = {
   result: QueryResult | null;
   error: string | null;
   running: boolean;
+  /** The last run: its statements (positions in `sql` when it ran) and outcome. */
+  lastRun?: TabRun | null;
+  /** The tab's open transaction, held on its own connection until it ends. */
+  tx?: { openedAtMs: number } | null;
+  /** Whether the result area shows the grid or the run's messages. */
+  resultView?: "results" | "messages";
 };
+
+export type TabRun = { statements: Stmt[]; script: ScriptResult };
 
 type ConnTabs = {
   tabs: Tab[];

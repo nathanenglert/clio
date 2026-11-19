@@ -32,6 +32,7 @@ pub async fn add_connection(core: &Core, input: NewConnectionInput) -> Result<Co
 pub async fn delete_connection(core: &Core, name: &str) -> Result<()> {
     let started = Instant::now();
     let r = async {
+        super::script::end_sessions_for(core, name).await;
         core.pools.drop_pool(name).await;
         connections::delete(&core.meta, name).await
     }
@@ -113,6 +114,7 @@ pub fn propose_query(core: &Core, sql: &str, title: Option<String>) -> String {
 
 pub async fn disconnect(core: &Core, name: &str) -> Result<()> {
     let started = Instant::now();
+    super::script::end_sessions_for(core, name).await;
     core.pools.drop_pool(name).await;
     core.redactor_cache.invalidate(name).await;
     core.scans.forget(name).await;

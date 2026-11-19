@@ -39,6 +39,7 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onAdd }: Props) {
           >
             <span className="tab-glyph">{tab.source === "table" ? "▦" : "≡"}</span>
             <span className="tab-label">{tab.title}</span>
+            {tab.tx && <span className="tab-tx" aria-label="transaction open" title="Transaction open" />}
             {tab.dirty && <span className="tab-dirty" aria-label="unsaved" />}
             <button
               className="tab-close"

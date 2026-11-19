@@ -173,7 +173,7 @@ async fn run_with_gate(
 
     // 6. Run the (possibly-modified) SQL. `reveal=false` — the MCP path
     //    never reveals sensitive data; see design/redaction.md §"MCP scope".
-    run_decoded(core, conn, &final_sql, /* reveal */ false, read_only).await
+    run_decoded(core, conn, &final_sql, /* reveal */ false, read_only, None).await
 }
 
 /// Run `EXPLAIN (FORMAT JSON) <sql>` and pull the planner's estimate of the
@@ -562,7 +562,7 @@ fn stmt_kind_str(k: StmtKind) -> &'static str {
 //   Start the DB with `dev/db.sh up`.
 // ─────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::activity::EmitFn;
     use crate::connections;
@@ -584,7 +584,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-    const TEST_CONN: &str = "testdb";
+    pub(in crate::core) const TEST_CONN: &str = "testdb";
 
     fn test_db_url() -> String {
         std::env::var("TEST_DATABASE_URL")
@@ -593,18 +593,20 @@ mod tests {
 
     /// A `Core` wired to the live test DB, plus the captured activity stream
     /// and a private throwaway schema for the test to mutate.
-    struct Harness {
-        core: Core,
+    pub(in crate::core) struct Harness {
+        pub(in crate::core) core: Core,
+        /// The UI core sharing `core`'s pools — the editor's caller.
+        pub(in crate::core) human: Core,
         events: UnboundedReceiver<ActivityEvent>,
-        pool: PgPool,
-        schema: String,
+        pub(in crate::core) pool: PgPool,
+        pub(in crate::core) schema: String,
     }
 
     /// Build a [`Harness`], or return `None` (and print a skip notice) when the
     /// test DB is unreachable. The Postgres pool is injected directly into the
     /// registry, so no secret-store or real connection record is needed; the
     /// in-memory metadata DB just carries the `testdb` row `run_decoded` reads.
-    async fn setup() -> Option<Harness> {
+    pub(in crate::core) async fn setup() -> Option<Harness> {
         let pool = match PgPoolOptions::new()
             .max_connections(4)
             .acquire_timeout(Duration::from_secs(3))
@@ -647,7 +649,7 @@ mod tests {
         });
 
         // The agent core mirrors the production caller of the gated runner.
-        let (_human, agent) = Core::ui_with_agent(meta, pools, emit);
+        let (human, agent) = Core::ui_with_agent(meta, pools, emit);
 
         let schema = format!("it_{}", uuid::Uuid::new_v4().simple());
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
@@ -657,6 +659,7 @@ mod tests {
 
         Some(Harness {
             core: agent,
+            human,
             events: rx,
             pool,
             schema,
@@ -664,7 +667,7 @@ mod tests {
     }
 
     impl Harness {
-        async fn drop_schema(&self) {
+        pub(in crate::core) async fn drop_schema(&self) {
             let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema))
                 .execute(&self.pool)
                 .await;
